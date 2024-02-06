@@ -166,3 +166,5 @@ fsdp_outputs
 logs
 DeepSpeed
 wandb
+processed_passages
+raw_data
