@@ -1,6 +1,6 @@
 import dataclasses
 import json
-import os
+from glob import glob
 import random
 from collections import OrderedDict, defaultdict
 from copy import deepcopy
@@ -372,3 +372,16 @@ def tensor_dict_to_device(tensor_dict: Dict[str, torch.Tensor], device: str = "c
 def web_log_every_n(logger, log_item: dict, n: int, log_every_n: int, rank: int = 0):
     if n % log_every_n == 0 and rank == 0:
         logger.log(log_item)
+
+
+def get_passage_file(p_id_list: List[int]) -> str:
+    """passage id를 받아서 해당되는 파일 이름을 반환합니다."""
+    target_file = None
+    p_id_max = max(p_id_list)
+    p_id_min = min(p_id_list)
+    for f in glob("./raw_data/processed_passages/*.p"):
+        s, e = f.split("/")[3].split(".")[0].split("-")
+        s, e = int(s), int(e)
+        if p_id_min >= s and p_id_max <= e:
+            target_file = f
+    return target_file

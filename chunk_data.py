@@ -27,9 +27,7 @@ class DataChunk:
         """input file format은 attardi/wikiextractor에 나온 형태를 따릅니다."""
         with open(input_file, "rt", encoding="utf8") as f:
             input_txt = f.read().strip()
-        input_txt = input_txt.split(
-            "</doc>"
-        )  # </doc> 태그로 split하여 각 article의 제목과 본문을 parsing합니다.
+        input_txt = input_txt.split("</doc>")  # </doc> 태그로 split하여 각 article의 제목과 본문을 parsing합니다.
         chunk_list = []
         orig_text = []
         for art in input_txt:
@@ -40,8 +38,8 @@ class DataChunk:
             title = art.split("\n")[0].strip(">").split("title=")[1].strip('"')
             text = "\n".join(art.split("\n")[2:]).strip()
 
-            encoded_title = self.tokenizer.encode(title)
-            encoded_txt = self.tokenizer.encode(text)
+            encoded_title = self.tokenizer(title, add_special_tokens=False).input_ids
+            encoded_txt = self.tokenizer(text, add_special_tokens=False).input_ids
             if len(encoded_txt) < 5:  # 본문 길이가 subword 5개 미만인 경우 패스
                 logger.debug(f"title {title} has <5 subwords in its article, passing")
                 continue
@@ -52,15 +50,13 @@ class DataChunk:
             # cls+title+sep + 100토큰씩 짤린 [cls+~~~~~+sep]로 구성됨
             for start_idx in range(0, len(encoded_txt), self.chunk_size):
                 end_idx = min(len(encoded_txt), start_idx + self.chunk_size)
-                chunk = encoded_title + encoded_txt[start_idx:end_idx]
+                chunk = encoded_title + [self.tokenizer.sep_token_id] + encoded_txt[start_idx:end_idx]
                 orig_text.append(self.tokenizer.decode(chunk))
                 chunk_list.append(chunk)
         return orig_text, chunk_list
 
 
-def save_orig_passage(
-    input_path="./raw_data/text", passage_path="processed_passages", chunk_size=100
-):
+def save_orig_passage(input_path="./raw_data/text", passage_path="./raw_data/processed_passages", chunk_size=100):
     """store original passages with unique id"""
     os.makedirs(passage_path, exist_ok=True)
     app = DataChunk(chunk_size=chunk_size)
@@ -75,7 +71,7 @@ def save_orig_passage(
 
 
 def save_title_index_map(
-    index_path="title_passage_map.p", source_passage_path="processed_passages"
+    index_path="./raw_data/title_passage_map.p", source_passage_path="./raw_data/processed_passages"
 ):
     """korquad와 klue 데이터 전처리를 위해 title과 passage id를 맵핑합니다.
     title_index_map : dict[str, list] 형태로, 특정 title에 해당하는 passage id를 저장합니다.
@@ -88,7 +84,7 @@ def save_title_index_map(
         with open(f, "rb") as _f:
             id_passage_map = pickle.load(_f)
         for id, passage in id_passage_map.items():
-            title = passage.split("[SEP]")[0].split("[CLS]")[1].strip()
+            title = passage.split("[SEP]")[0].strip()
             title_id_map[title].append(id)
         logger.info(f"processed {len(id_passage_map)} passages from {f}...")
     with open(index_path, "wb") as f:
