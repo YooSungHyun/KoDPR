@@ -7,7 +7,7 @@ from transformers import AutoTokenizer
 from datasets import load_dataset
 from rank_bm25 import BM25Okapi
 from datasets import Dataset
-
+import multiprocessing as mp
 
 tokenizer = AutoTokenizer.from_pretrained("team-lucid/deberta-v3-base-korean")
 klue = load_dataset("KLUE", name="mrc")
@@ -15,9 +15,9 @@ MODEL_MAX_LENGTH = 512
 CHUNK_SIZE = 100
 
 
-def raw_preprocess(datasets, dir_path, output_list, error_list):
-    # ['title', 'context', 'news_category', 'source', 'guid', 'is_impossible', 'question_type', 'question', 'answers']
-    for each in tqdm(datasets, desc="KLUE"):
+def raw_preprocess(start_index, end_index, data, output_list, error_list):
+    for idx in tqdm(range(start_index, end_index), desc="raw preprocess"):
+        each = data[idx]
         if each["is_impossible"]:
             continue
         data_dict = dict()
@@ -97,12 +97,8 @@ def raw_preprocess(datasets, dir_path, output_list, error_list):
                 output_list.append(copy.deepcopy(data_dict))
 
 
-def make_bm25_hard(train_list):
-    datasets = Dataset.from_pandas(pd.DataFrame(data=train_list))
-    tot_ctxs = datasets["context"]
-    tokenized_corpus = [tokenizer.tokenize(doc) for doc in tot_ctxs]
-    bm25 = BM25Okapi(tokenized_corpus)
-    for i in tqdm(range(len(train_list)), desc="hard bm25 making"):
+def make_bm25_hard(start_index, end_index, tot_ctxs, bm25, datasets, train_list, output):
+    for i in tqdm(range(start_index, end_index), desc="hard bm25 making"):
         query = train_list[i]["question"]
 
         tokenized_query = tokenizer.tokenize(query)
@@ -118,40 +114,81 @@ def make_bm25_hard(train_list):
                 if data["answer"] != train_list[i]["answer"]:
                     train_list[i]["bm25_hard"] = copy.deepcopy(data)
                     break
+        output.append(train_list[i])
+
+def main():
+    print("@@@@@@@@@@ train raw preprocess @@@@@@@@@@")
+    train_dir = "./raw_data/train"
+    train_output = "klue_data_bm25.json"
+    if not os.path.exists(os.path.join(train_dir, train_output)):
+        train_list = mp.Manager().list()
+        train_error_list = mp.Manager().list()
+        num_processes = mp.cpu_count()
+        file_name, exp = train_output.split(".")
+        preproc_split = file_name.split("_")[:2]
+        preproc_output = "_".join(preproc_split) + "_preproc." + exp
+        if not os.path.exists(os.path.join(train_dir, preproc_output)):
+            data = klue["train"].to_list()
+            num_processes = min(len(data), num_processes)
+            processes = []
+            chunk_size = max(len(data) // num_processes, 1)
+            for idx in range(num_processes):
+                start_index = idx * chunk_size
+                end_index = min((idx + 1) * chunk_size, len(data))
+                p = mp.Process(target=raw_preprocess, args=(start_index, end_index, data, train_list, train_error_list))
+                processes.append(p)
+                p.start()
+
+            for child in processes:
+                child.join()
+
+            train_list = list(train_list)
+            error_list = list(train_error_list)
+
+            with open(os.path.join(train_dir, preproc_output), "w", encoding="utf-8") as file:
+                file.write(json.dumps(train_list, indent=4))
+            with open(os.path.join(train_dir, f"{'_'.join(preproc_split)}_error.json"), "w", encoding="utf-8") as file:
+                file.write(json.dumps(error_list, indent=4))
+        else:
+            with open(os.path.join(train_dir, preproc_output), "r", encoding="utf-8") as f:
+                train_list = json.load(f)
+
+        output = mp.Manager().list()
+        processes = []
+        chunk_size = max(len(train_list) // num_processes, 1)
+        datasets = Dataset.from_pandas(pd.DataFrame(data=train_list))
+        tot_ctxs = datasets["context"]
+        tokenized_corpus = [tokenizer.tokenize(doc) for doc in tot_ctxs]
+        bm25 = BM25Okapi(tokenized_corpus)
+        for idx in range(num_processes):
+            start_index = idx * chunk_size
+            end_index = min((idx + 1) * chunk_size, len(train_list))
+            p = mp.Process(
+                target=make_bm25_hard, args=(start_index, end_index, tot_ctxs, bm25, datasets, train_list, output)
+            )
+            processes.append(p)
+            p.start()
+        for child in processes:
+            child.join()
+
+        processed_data = list(output)
+
+        with open(os.path.join(train_dir, train_output), "w", encoding="utf-8") as file:
+            file.write(json.dumps(processed_data, indent=4))
+
+    print("@@@@@@@@@@ dev raw preprocess @@@@@@@@@@")
+    valid_dir = "./raw_data/dev"
+    valid_output = "klue_data.json"
+    if not os.path.exists(os.path.join(valid_dir, valid_output)):
+        valid_list = []
+        valid_error_list = []
+
+        raw_preprocess(0, len(klue["validation"].to_list()), klue["validation"].to_list(), valid_list, valid_error_list)
+        with open(os.path.join(valid_dir, valid_output), "w", encoding="utf-8") as file:
+            file.write(json.dumps(valid_list, indent=4))
+        with open(os.path.join(valid_dir, "error_data.json"), "w", encoding="utf-8") as file:
+            file.write(json.dumps(valid_error_list, indent=4))
 
 
-print("@@@@@@@@@@ train raw preprocess @@@@@@@@@@")
-train_dir = "./raw_data/train"
-train_output = "klue_data_bm25.json"
-if not os.path.exists(os.path.join(train_dir, train_output)):
-    train_list = []
-    train_error_list = []
-    file_name, exp = train_output.split(".")
-    preproc_split = file_name.split("_")[:2]
-    preproc_output = "_".join(preproc_split)+"_preproc."+exp
-    if not os.path.exists(os.path.join(train_dir, preproc_output)):
-        raw_preprocess(klue["train"].to_list(), train_dir, train_list, train_error_list)
-        with open(os.path.join(train_dir, preproc_output), "w", encoding="utf-8") as file:
-            file.write(json.dumps(train_list, indent=4))
-        with open(os.path.join(train_dir, f"{'_'.join(preproc_split)}_error.json"), "w", encoding="utf-8") as file:
-            file.write(json.dumps(train_error_list, indent=4))
-    else:
-        with open(os.path.join(train_dir, preproc_output), "r", encoding="utf-8") as f:
-            train_list = json.load(f)
-
-    make_bm25_hard(train_list)
-    with open(os.path.join(train_dir, train_output), "w", encoding="utf-8") as file:
-        file.write(json.dumps(train_list, indent=4))
-
-print("@@@@@@@@@@ dev raw preprocess @@@@@@@@@@")
-valid_dir = "./raw_data/dev"
-valid_output = "klue_data.json"
-if not os.path.exists(os.path.join(valid_dir, valid_output)):
-    valid_list = []
-    valid_error_list = []
-
-    raw_preprocess(klue["validation"].to_list(), valid_dir, valid_list, valid_error_list)
-    with open(os.path.join(valid_dir, valid_output), "w", encoding="utf-8") as file:
-        file.write(json.dumps(valid_list, indent=4))
-    with open(os.path.join(valid_dir, "error_data.json"), "w", encoding="utf-8") as file:
-        file.write(json.dumps(valid_error_list, indent=4))
+if __name__ == '__main__':
+    main()

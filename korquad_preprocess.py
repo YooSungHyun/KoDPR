@@ -8,6 +8,9 @@ from datasets import load_dataset
 import pickle
 import re
 from utils.comfy import get_passage_file
+from rank_bm25 import BM25Okapi
+from datasets import Dataset
+
 tokenizer = AutoTokenizer.from_pretrained("team-lucid/deberta-v3-base-korean")
 MODEL_MAX_LENGTH = 512
 CHUNK_SIZE = 100
@@ -83,3 +86,34 @@ if not os.path.exists(korquad_processed_path):
     ]
     with open(korquad_processed_path, "w", encoding="utf-8") as file:
         file.write(json.dumps(tokenized_tuples, indent=4))
+else:
+    def make_bm25_hard(train_list):
+        datasets = Dataset.from_pandas(pd.DataFrame(data=train_list))
+        tot_ctxs = datasets["context"]
+        tokenized_corpus = [tokenizer.tokenize(doc) for doc in tot_ctxs]
+        bm25 = BM25Okapi(tokenized_corpus)
+        for i in tqdm(range(len(train_list)), desc="hard bm25 making"):
+            query = train_list[i]["question"]
+
+            tokenized_query = tokenizer.tokenize(query)
+            bm25_100 = bm25.get_top_n(tokenized_query, tot_ctxs, n=100)
+
+            train_list[i]["bm25_hard"] = dict()
+            for source in bm25_100:
+                if train_list[i]["bm25_hard"]:
+                    break
+                source_datas = datasets.filter(lambda x: x["context"] == source)
+                source_datas = source_datas.shuffle()
+                for data in source_datas:
+                    if data["answer"] != train_list[i]["answer"]:
+                        train_list[i]["bm25_hard"] = copy.deepcopy(data)
+                        break
+
+    if split == "train":
+        train_output = f"./raw_data/{split}/korquad_1.0_{split}_processed_bm25.json"
+        with open(korquad_processed_path, "r", encoding="utf-8") as f:
+            train_list = json.load(f)
+
+        make_bm25_hard(train_list)
+        with open(train_output, "w", encoding="utf-8") as file:
+            file.write(json.dumps(train_list, indent=4))

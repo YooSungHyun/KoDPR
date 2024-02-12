@@ -4,6 +4,10 @@ import json
 import pandas as pd
 from tqdm import tqdm
 from transformers import AutoTokenizer
+from rank_bm25 import BM25Okapi
+from datasets import Dataset
+import torch
+import torch.multiprocessing as mp
 
 tokenizer = AutoTokenizer.from_pretrained("team-lucid/deberta-v3-base-korean")
 MODEL_MAX_LENGTH = 512
@@ -15,7 +19,7 @@ def raw_preprocess(templates_list, dir_path, output_list, error_list):
 
         with open(os.path.join(dir_path, file_name), "r", encoding="utf-8") as f:
             sample = json.load(f)
-
+        
         for each in tqdm(sample["data"], desc=file_name):
             data_dict = dict()
             data_dict["doc_id"] = ""
@@ -117,6 +121,29 @@ def raw_preprocess(templates_list, dir_path, output_list, error_list):
                     output_list.append(copy.deepcopy(data_dict))
 
 
+def make_bm25_hard(train_list):
+    datasets = Dataset.from_pandas(pd.DataFrame(data=train_list))
+    tot_ctxs = datasets["context"]
+    tokenized_corpus = [tokenizer.tokenize(doc) for doc in tot_ctxs]
+    bm25 = BM25Okapi(tokenized_corpus)
+    for i in tqdm(range(len(train_list)), desc="hard bm25 making"):
+        query = train_list[i]["question"]
+
+        tokenized_query = tokenizer.tokenize(query)
+        bm25_100 = bm25.get_top_n(tokenized_query, tot_ctxs, n=100)
+
+        train_list[i]["bm25_hard"] = dict()
+        for source in bm25_100:
+            if train_list[i]["bm25_hard"]:
+                break
+            source_datas = datasets.filter(lambda x: x["context"] == source)
+            source_datas = source_datas.shuffle()
+            for data in source_datas:
+                if data["answer"] != train_list[i]["answer"]:
+                    train_list[i]["bm25_hard"] = copy.deepcopy(data)
+                    break
+
+
 TRAIN_DATASETS_TEMPLATES_01 = [
     "TL_span_extraction.json",
     "TL_span_inference.json",
@@ -133,15 +160,28 @@ TRAIN_DATASETS_TEMPLATES_01 = [
 
 print("@@@@@@@@@@ train raw preprocess @@@@@@@@@@")
 train_dir = "./raw_data/train"
-train_output = "train_data.json"
+train_output = "train_data_bm25.json"
 if not os.path.exists(os.path.join(train_dir, train_output)):
     train_list = []
     train_error_list = []
-    raw_preprocess(TRAIN_DATASETS_TEMPLATES_01, train_dir, train_list, train_error_list)
+    file_name, exp = train_output.split(".")
+    preproc_split = file_name.split("_")[:2]
+    preproc_output = "_".join(preproc_split)+"_preproc."+exp
+    if not os.path.exists(os.path.join(train_dir, preproc_output)):
+        queue = mp.Queue()
+
+        raw_preprocess(TRAIN_DATASETS_TEMPLATES_01, train_dir, train_list, train_error_list)
+        with open(os.path.join(train_dir, preproc_output), "w", encoding="utf-8") as file:
+            file.write(json.dumps(train_list, indent=4))
+        with open(os.path.join(train_dir, f"{'_'.join(preproc_split)}_error.json"), "w", encoding="utf-8") as file:
+            file.write(json.dumps(train_error_list, indent=4))
+    else:
+        with open(os.path.join(train_dir, preproc_output), "r", encoding="utf-8") as f:
+            train_list = json.load(f)
+
+    make_bm25_hard(train_list)
     with open(os.path.join(train_dir, train_output), "w", encoding="utf-8") as file:
         file.write(json.dumps(train_list, indent=4))
-    with open(os.path.join(train_dir, "error_data.json"), "w", encoding="utf-8") as file:
-        file.write(json.dumps(train_error_list, indent=4))
 
 VALID_DATASETS_TEMPLATES_01 = [
     "VL_span_extraction.json",
