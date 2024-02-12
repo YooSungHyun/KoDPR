@@ -9,14 +9,12 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.distributed as dist
+from torch.utils.data import DistributedSampler
 import wandb
 from arguments.training_args import TrainingArguments
-from networks.models import Net
+from networks.models import KobertBiEncoder
 from setproctitle import setproctitle
 from simple_parsing import ArgumentParser
-from sklearn.preprocessing import MinMaxScaler
-from torch.utils.data import DistributedSampler, random_split
-from torch_optimizer import Adafactor
 from trainer.deepspeed import Trainer
 from utils.comfy import (
     dataclass_to_namespace,
@@ -27,10 +25,12 @@ from utils.comfy import (
     web_log_every_n,
     tensor_dict_to_device,
 )
+from transformers import AutoTokenizer
+from utils.data.jsonl_dataset import JsonlDataset
 from utils.data.custom_dataloader import CustomDataLoader
-from utils.data.custom_sampler import DistributedLengthGroupedSampler
-from utils.data.np_dataset import NumpyDataset
+from utils.data.custom_sampler import DistributedUniqueSampler
 from torch.cuda.amp import autocast
+
 
 # it is only lstm example.
 torch.backends.cudnn.enabled = False
@@ -50,7 +50,6 @@ class DSTrainer(Trainer):
     def __init__(
         self,
         device_id,
-        criterion,
         eval_metric=None,
         precision="fp32",
         cmd_logger=None,
@@ -71,7 +70,6 @@ class DSTrainer(Trainer):
     ):
         super().__init__(
             device_id,
-            criterion,
             eval_metric,
             precision,
             cmd_logger,
@@ -91,6 +89,20 @@ class DSTrainer(Trainer):
             metric_on_cpu,
         )
 
+    def ibn_loss(self, pred: torch.FloatTensor):
+        """in-batch negative를 활용한 batch의 loss를 계산합니다.
+        pred : bsz x bsz 또는 bsz x bsz*2의 logit 값을 가짐. 후자는 hard negative를 포함하는 경우.
+        """
+        bsz = pred.size(0)
+        target = torch.arange(bsz).to(self.device)  # 주대각선이 answer
+        return torch.nn.functional.cross_entropy(pred, target)
+
+    def batch_acc(self, pred: torch.FloatTensor):
+        """batch 내의 accuracy를 계산합니다."""
+        bsz = pred.size(0)
+        target = torch.arange(bsz)  # 주대각선이 answer
+        return (pred.detach().cpu().max(1).indices == target).sum().float() / bsz
+
     def training_step(self, model, batch, batch_idx) -> torch.Tensor:
         """A single training step, running forward and backward. The optimizer step is called separately, as this is
         given as a closure to the optimizer step.
@@ -103,11 +115,18 @@ class DSTrainer(Trainer):
         """
         # TODO(User): fit the input and output for your model architecture!
         with autocast(enabled=self.mixed_precision, dtype=self.precision):
-            labels = batch.pop("labels")
-
-            # SUPER IMPORTANT, Deepspeed auto_cast is only working on `*args` not `**kwargs`!!!!
-            output = model(**batch)
-            loss = self.criterion(output, labels)
+            q, q_mask, _, p, p_mask = batch
+            # q, q_mask, p, p_mask = (
+            #     q.to(self.device),
+            #     q_mask.to(self.device),
+            #     p.to(self.device),
+            #     p_mask.to(self.device),
+            # )
+            q_emb = model(q, q_mask, "query")  # bsz x bert_dim
+            p_emb = model(p, p_mask, "passage")  # bsz x bert_dim
+            pred = torch.matmul(q_emb, p_emb.T)  # bsz x bsz
+            loss = self.ibn_loss(pred)
+            acc = self.batch_acc(pred)
 
         def on_before_backward(loss):
             pass
@@ -120,7 +139,7 @@ class DSTrainer(Trainer):
 
         on_after_backward()
 
-        log_output = {"loss": loss}
+        log_output = {"loss": loss, "acc": acc}
         # avoid gradients in stored/accumulated values -> prevents potential OOM
         self._current_train_return = apply_to_collection(log_output, dtype=torch.Tensor, function=lambda x: x.detach())
 
@@ -128,6 +147,7 @@ class DSTrainer(Trainer):
             self.web_logger,
             {
                 "train/loss": self._current_train_return["loss"],
+                "train/acc": self._current_train_return["acc"],
                 "train/step": self.step,
                 "train/global_step": self.global_step,
                 "train/epoch": self.current_epoch,
@@ -204,16 +224,24 @@ class DSTrainer(Trainer):
                 # if self.precision == torch.bfloat16:
                 # tensor_dict_to_dtype(batch, self.precision)
 
-                labels = batch.pop("labels")
+                q, q_mask, _, p, p_mask = batch
+                q, q_mask, p, p_mask = (
+                    q.to(self.device),
+                    q_mask.to(self.device),
+                    p.to(self.device),
+                    p_mask.to(self.device),
+                )
+                q_emb = self.model(q, q_mask, "query")  # bsz x bert_dim
+                p_emb = self.model(p, p_mask, "passage")  # bsz x bert_dim
+                pred = torch.matmul(q_emb, p_emb.T)  # bsz x bsz
+                loss = self.ibn_loss(pred)
+                acc = self.batch_acc(pred)
 
-                outputs = model(**batch)
-                loss = self.criterion(outputs, labels)
+            # contrastive loss는 배치의 index로 label을 정하기 때문에, 무작정 gather하면 label이 안맞는 현상이 발생할 수 있다.
+            #
+            tot_batch_logits.append(pred.to(metric_on_device))
 
-            # TODO(User): what do you want to log items every epoch end?
-            tot_batch_logits.append(outputs.to(metric_on_device))
-            tot_batch_labels.append(labels.to(metric_on_device))
-
-            log_output = {"loss": loss}
+            log_output = {"loss": loss, "acc": acc}
             # avoid gradients in stored/accumulated values -> prevents potential OOM
             self._current_val_return = apply_to_collection(
                 log_output, torch.Tensor, lambda x: x.detach().to(metric_on_device)
@@ -222,12 +250,13 @@ class DSTrainer(Trainer):
             def on_validation_batch_end(eval_out, batch, batch_idx):
                 pass
 
-            on_validation_batch_end(outputs, batch, batch_idx)
+            on_validation_batch_end(pred, batch, batch_idx)
 
             web_log_every_n(
                 self.web_logger,
                 {
                     "eval_step/loss": self._current_val_return["loss"],
+                    "eval_step/acc": self._current_val_return["acc"],
                     "eval_step/step": eval_step,
                     "eval_step/global_step": self.global_step,
                     "eval_step/epoch": self.current_epoch,
@@ -241,10 +270,9 @@ class DSTrainer(Trainer):
             eval_step += 1
 
         # TODO(User): Create any form you want to output to wandb!
-        def on_validation_epoch_end(tot_batch_logits, tot_batch_labels, metric_device):
+        def on_validation_epoch_end(tot_batch_logits, metric_device):
             # if you want to see all_reduce example, see `fsdp_train.py`'s eval_loop
             tot_batch_logits = torch.cat(tot_batch_logits, dim=0)
-            tot_batch_labels = torch.cat(tot_batch_labels, dim=0)
 
             # all_gather` requires a `fixed length tensor` as input.
             # Since the length of the data on each GPU may be different, the length should be passed to `all_gather` first.
@@ -264,26 +292,17 @@ class DSTrainer(Trainer):
                 )
                 for size in size_list
             ]
-            labels_gathered_data = [
-                torch.zeros(
-                    (size.item(), tot_batch_labels.size(-1)), dtype=tot_batch_labels.dtype, device=metric_device
-                )
-                for size in size_list
-            ]
 
             # Collect and match data from all GPUs.
             if metric_device == torch.device("cpu"):
                 # Collect and match data from all GPUs.
                 dist.all_gather_object(logits_gathered_data, tot_batch_logits)
-                dist.all_gather_object(labels_gathered_data, tot_batch_labels)
             else:
                 dist.all_gather(logits_gathered_data, tot_batch_logits)
-                dist.all_gather(labels_gathered_data, tot_batch_labels)
 
             # example 4 gpus : [gpu0[tensor],gpu1[tensor],gpu2[tensor],gpu3[tensor]]
             logits_gathered_data = torch.cat(logits_gathered_data, dim=0)
-            labels_gathered_data = torch.cat(labels_gathered_data, dim=0)
-            epoch_loss = self.criterion(logits_gathered_data, labels_gathered_data)
+            epoch_loss = self.ibn_loss(logits_gathered_data)
             epoch_rmse = torch.sqrt(epoch_loss)
             # epoch monitoring is must doing every epoch
             web_log_every_n(
@@ -294,7 +313,7 @@ class DSTrainer(Trainer):
                 self.device_id,
             )
 
-        on_validation_epoch_end(tot_batch_logits, tot_batch_labels, metric_on_device)
+        on_validation_epoch_end(tot_batch_logits, metric_on_device)
 
         def on_validation_model_train(model):
             torch.set_grad_enabled(True)
@@ -324,100 +343,58 @@ def main(hparams: TrainingArguments):
     if local_rank == 0:
         web_logger = wandb.init(config=hparams)
 
-    df_train = pd.read_csv(hparams.train_datasets_path, header=0, encoding="utf-8")
+    tokenizer = AutoTokenizer.from_pretrained("team-lucid/deberta-v3-base-korean")
+
+    def preprocess(examples):
+        # deberta는 cls, sep(eos) 자동으로 넣어줌
+        batch_p = tokenizer(examples["context"], return_tensors="pt", return_length=True)
+        batch_q = tokenizer(examples["question"], return_tensors="pt", return_length=True)
+        bm25_batch_p = tokenizer(examples["bm25_hard"]["context"], return_tensors="pt", return_length=True)
+        bm25_batch_q = tokenizer(examples["bm25_hard"]["question"], return_tensors="pt", return_length=True)
+        bm25_tokenized_answer = tokenizer(examples["bm25_hard"]["answer"], return_tensors="pt")
+        tokenized_answer = tokenizer(examples["answer"], return_tensors="pt")
+        examples["batch_p_input_ids"] = batch_p["input_ids"][0]
+        examples["batch_p_attention_mask"] = batch_p["attention_mask"][0]
+        examples["batch_p_token_type_ids"] = batch_p["token_type_ids"][0]
+        examples["batch_p_length"] = batch_p["length"]
+        examples["batch_q_input_ids"] = batch_q["input_ids"][0]
+        examples["batch_q_attention_mask"] = batch_q["attention_mask"][0]
+        examples["batch_q_token_type_ids"] = batch_q["token_type_ids"][0]
+        examples["batch_q_length"] = batch_q["length"]
+        examples["labels"] = tokenized_answer["input_ids"][0]
+        examples["bm25_batch_p_input_ids"] = bm25_batch_p["input_ids"][0]
+        examples["bm25_batch_p_attention_mask"] = bm25_batch_p["attention_mask"][0]
+        examples["bm25_batch_p_token_type_ids"] = bm25_batch_p["token_type_ids"][0]
+        examples["bm25_batch_p_length"] = bm25_batch_p["length"]
+        examples["bm25_batch_q_input_ids"] = bm25_batch_q["input_ids"][0]
+        examples["bm25_batch_q_attention_mask"] = bm25_batch_q["attention_mask"][0]
+        examples["bm25_batch_q_token_type_ids"] = bm25_batch_q["token_type_ids"][0]
+        examples["bm25_batch_q_length"] = bm25_batch_q["length"]
+        examples["bm25_labels"] = bm25_tokenized_answer["input_ids"][0]
+        examples["bm25_answer"] = examples["bm25_hard"]["answer"]
+
+        return examples
+
+    train_dataset = JsonlDataset("./raw_data/train/klue_data_bm25.json", transform=preprocess)
     # Kaggle author Test Final RMSE: 0.06539
-    df_eval = pd.read_csv(hparams.eval_datasets_path, header=0, encoding="utf-8")
+    eval_dataset = JsonlDataset("./raw_data/dev/klue_data.json", transform=preprocess)
 
-    df_train_scaled = df_train.copy()
-    df_test_scaled = df_eval.copy()
-
-    # Define the mapping dictionary
-    mapping = {"NE": 0, "SE": 1, "NW": 2, "cv": 3}
-
-    # Replace the string values with numerical values
-    df_train_scaled["wnd_dir"] = df_train_scaled["wnd_dir"].map(mapping)
-    df_test_scaled["wnd_dir"] = df_test_scaled["wnd_dir"].map(mapping)
-
-    df_train_scaled["date"] = pd.to_datetime(df_train_scaled["date"])
-    # Resetting the index
-    df_train_scaled.set_index("date", inplace=True)
-    logger.info(df_train_scaled.head())
-
-    scaler = MinMaxScaler()
-
-    # Define the columns to scale
-    columns = ["pollution", "dew", "temp", "press", "wnd_dir", "wnd_spd", "snow", "rain"]
-
-    df_test_scaled = df_test_scaled[columns]
-
-    # Scale the selected columns to the range 0-1
-    df_train_scaled[columns] = scaler.fit_transform(df_train_scaled[columns])
-    df_test_scaled[columns] = scaler.transform(df_test_scaled[columns])
-
-    # Show the scaled data
-    logger.info(df_train_scaled.head())
-
-    df_train_scaled = np.array(df_train_scaled)
-    df_test_scaled = np.array(df_test_scaled)
-
-    x = []
-    y = []
-    n_future = 1
-    n_past = 11
-
-    #  Train Sets
-    for i in range(n_past, len(df_train_scaled) - n_future + 1):
-        x.append(df_train_scaled[i - n_past : i, 1 : df_train_scaled.shape[1]])
-        y.append(df_train_scaled[i + n_future - 1 : i + n_future, 0])
-    x_train, y_train = np.array(x), np.array(y)
-
-    #  Test Sets
-    x = []
-    y = []
-    for i in range(n_past, len(df_test_scaled) - n_future + 1):
-        x.append(df_test_scaled[i - n_past : i, 1 : df_test_scaled.shape[1]])
-        y.append(df_test_scaled[i + n_future - 1 : i + n_future, 0])
-    x_test, y_test = np.array(x), np.array(y)
-
-    logger.info(
-        "X_train shape : {}   y_train shape : {} \n"
-        "X_test shape : {}      y_test shape : {} ".format(x_train.shape, y_train.shape, x_test.shape, y_test.shape)
+    custom_train_sampler = DistributedUniqueSampler(
+        dataset=train_dataset,
+        batch_size=hparams.per_device_train_batch_size,
+        num_replicas=world_size,
+        rank=local_rank,
+        seed=hparams.seed,
+    )
+    custom_eval_sampler = DistributedSampler(
+        dataset=eval_dataset, num_replicas=world_size, rank=local_rank, seed=hparams.seed, drop_last=True
     )
 
-    train_dataset = NumpyDataset(
-        x_train,
-        y_train,
-        feature_column_name=hparams.feature_column_name,
-        labels_column_name=hparams.labels_column_name,
-    )
-    eval_dataset = NumpyDataset(
-        x_test,
-        y_test,
-        feature_column_name=hparams.feature_column_name,
-        labels_column_name=hparams.labels_column_name,
-    )
-
-    if hparams.group_by_length:
-        custom_train_sampler = DistributedLengthGroupedSampler(
-            batch_size=hparams.per_device_train_batch_size,
-            dataset=train_dataset,
-            rank=rank,
-            seed=hparams.seed,
-            model_input_name=train_dataset.length_column_name,
-        )
-        custom_eval_sampler = DistributedLengthGroupedSampler(
-            batch_size=hparams.per_device_eval_batch_size,
-            dataset=eval_dataset,
-            rank=rank,
-            seed=hparams.seed,
-            model_input_name=eval_dataset.length_column_name,
-        )
-    else:
-        # DistributedSampler's shuffle: each device get random indices data segment in every epoch
-        custom_train_sampler = DistributedSampler(
-            train_dataset, seed=hparams.seed, rank=rank, shuffle=hparams.sampler_shuffle
-        )
-        custom_eval_sampler = DistributedSampler(eval_dataset, seed=hparams.seed, rank=rank, shuffle=False)
+    test = list(custom_train_sampler.__iter__())
+    for i in range(0, len(test), hparams.per_device_train_batch_size):
+        assert len(set(train_dataset[test[i : i + hparams.per_device_train_batch_size]]["answer"])) == len(
+            train_dataset[test[i : i + hparams.per_device_train_batch_size]]["answer"]
+        ), "answer가 중복되는 배치 발생!"
 
     # DataLoader's shuffle: one device get random indices dataset in every epoch
     # example np_dataset is already set (feature)7:1(label), so, it can be all shuffle `True` between sampler and dataloader
@@ -450,23 +427,13 @@ def main(hparams: TrainingArguments):
     steps_per_epoch = math.floor(len(train_dataloader) / hparams.accumulate_grad_batches)
 
     # Instantiate objects
-    model = Net().cuda(local_rank)
+    model = KobertBiEncoder().cuda(local_rank)
 
     if local_rank == 0:
         web_logger.watch(model, log_freq=hparams.log_every_n)
 
     optimizer = None
     initial_lr = hparams.learning_rate / hparams.div_factor
-
-    # if using OneCycleLR, optim lr is not important,
-    # torch native, lr update to start_lr automatically
-    # deepspeed, lr update to end_lr automatically
-    # optimizer = Adafactor(
-    #     model.parameters(),
-    #     lr=hparams.learning_rate,
-    #     beta1=hparams.optim_beta1,
-    #     weight_decay=hparams.weight_decay,
-    # )
 
     # If you use torch optim and scheduler, It can have unexpected behavior. The current implementation is written for the worst case scenario.
     # For some reason, I was found that `loss` is not `auto_cast`, so in the current example, `auto_cast` manually.
@@ -481,10 +448,6 @@ def main(hparams: TrainingArguments):
         weight_decay=hparams.weight_decay,
     )
 
-    cycle_momentum = True
-    if isinstance(optimizer, Adafactor):
-        cycle_momentum = False
-
     # TODO(user): If you want to using deepspeed lr_scheduler, change this code line
     # max_lr = hparams.learning_rate
     # initial_lr = hparams.learning_rate / hparams.div_factor
@@ -498,7 +461,7 @@ def main(hparams: TrainingArguments):
         div_factor=hparams.div_factor,
         final_div_factor=hparams.final_div_factor,
         steps_per_epoch=steps_per_epoch,
-        cycle_momentum=cycle_momentum,
+        cycle_momentum=True,
     )
 
     # If you want to using own optimizer and scheduler,
@@ -582,7 +545,6 @@ def main(hparams: TrainingArguments):
     eval_metric = None
     trainer = DSTrainer(
         device_id=local_rank,
-        criterion=criterion,
         eval_metric=eval_metric,
         precision=hparams.model_dtype,
         cmd_logger=logger,
