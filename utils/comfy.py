@@ -360,13 +360,14 @@ def apply_to_collections(
 def tensor_dict_to_device(tensor_dict: Dict[str, torch.Tensor], device: str = "cpu", non_blocking: bool = False):
     # assert isinstance(tensor_dict, [dict]), f"tensor_dict is not dicts. Found {type(tensor_dict)}."
 
-    for k, v in tensor_dict.items():
-        if isinstance(v, dict):
-            tensor_dict_to_device(v, device, non_blocking=non_blocking)
-        elif isinstance(v, torch.Tensor):
-            tensor_dict[k] = v.to(device, non_blocking=non_blocking)
-        else:
-            raise TypeError(f"value of dict is not torch.Tensor. Found {type(v)}")
+    for i in range(len(tensor_dict)):
+        for k, v in tensor_dict[i].items():
+            if isinstance(v, dict):
+                tensor_dict_to_device(v, device, non_blocking=non_blocking)
+            elif isinstance(v, torch.Tensor):
+                tensor_dict[i][k] = v.to(device, non_blocking=non_blocking)
+            else:
+                raise TypeError(f"value of dict is not torch.Tensor. Found {type(v)}")
 
 
 def web_log_every_n(logger, log_item: dict, n: int, log_every_n: int, rank: int = 0):

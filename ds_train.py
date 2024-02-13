@@ -30,6 +30,7 @@ from utils.data.jsonl_dataset import JsonlDataset
 from utils.data.custom_dataloader import CustomDataLoader
 from utils.data.custom_sampler import DistributedUniqueSampler
 from torch.cuda.amp import autocast
+from torch_optimizer import Adafactor
 
 
 # it is only lstm example.
@@ -115,15 +116,9 @@ class DSTrainer(Trainer):
         """
         # TODO(User): fit the input and output for your model architecture!
         with autocast(enabled=self.mixed_precision, dtype=self.precision):
-            q, q_mask, _, p, p_mask = batch
-            # q, q_mask, p, p_mask = (
-            #     q.to(self.device),
-            #     q_mask.to(self.device),
-            #     p.to(self.device),
-            #     p_mask.to(self.device),
-            # )
-            q_emb = model(q, q_mask, "query")  # bsz x bert_dim
-            p_emb = model(p, p_mask, "passage")  # bsz x bert_dim
+            batch_p, batch_q = batch
+            p_emb = model(batch_p, "passage")  # bsz x bert_dim
+            q_emb = model(batch_q, "query")  # bsz x bert_dim
             pred = torch.matmul(q_emb, p_emb.T)  # bsz x bsz
             loss = self.ibn_loss(pred)
             acc = self.batch_acc(pred)
@@ -347,36 +342,50 @@ def main(hparams: TrainingArguments):
 
     def preprocess(examples):
         # deberta는 cls, sep(eos) 자동으로 넣어줌
-        batch_p = tokenizer(examples["context"], return_tensors="pt", return_length=True)
-        batch_q = tokenizer(examples["question"], return_tensors="pt", return_length=True)
-        bm25_batch_p = tokenizer(examples["bm25_hard"]["context"], return_tensors="pt", return_length=True)
-        bm25_batch_q = tokenizer(examples["bm25_hard"]["question"], return_tensors="pt", return_length=True)
-        bm25_tokenized_answer = tokenizer(examples["bm25_hard"]["answer"], return_tensors="pt")
-        tokenized_answer = tokenizer(examples["answer"], return_tensors="pt")
-        examples["batch_p_input_ids"] = batch_p["input_ids"][0]
-        examples["batch_p_attention_mask"] = batch_p["attention_mask"][0]
-        examples["batch_p_token_type_ids"] = batch_p["token_type_ids"][0]
-        examples["batch_p_length"] = batch_p["length"]
-        examples["batch_q_input_ids"] = batch_q["input_ids"][0]
-        examples["batch_q_attention_mask"] = batch_q["attention_mask"][0]
-        examples["batch_q_token_type_ids"] = batch_q["token_type_ids"][0]
-        examples["batch_q_length"] = batch_q["length"]
-        examples["labels"] = tokenized_answer["input_ids"][0]
-        examples["bm25_batch_p_input_ids"] = bm25_batch_p["input_ids"][0]
-        examples["bm25_batch_p_attention_mask"] = bm25_batch_p["attention_mask"][0]
-        examples["bm25_batch_p_token_type_ids"] = bm25_batch_p["token_type_ids"][0]
-        examples["bm25_batch_p_length"] = bm25_batch_p["length"]
-        examples["bm25_batch_q_input_ids"] = bm25_batch_q["input_ids"][0]
-        examples["bm25_batch_q_attention_mask"] = bm25_batch_q["attention_mask"][0]
-        examples["bm25_batch_q_token_type_ids"] = bm25_batch_q["token_type_ids"][0]
-        examples["bm25_batch_q_length"] = bm25_batch_q["length"]
-        examples["bm25_labels"] = bm25_tokenized_answer["input_ids"][0]
+        batch_p = tokenizer(
+            tokenizer.cls_token + examples["context"],
+            add_special_tokens=False,
+            return_token_type_ids=False,
+            return_attention_mask=False,
+        )
+        batch_q = tokenizer(
+            tokenizer.cls_token + examples["question"],
+            add_special_tokens=False,
+            return_token_type_ids=False,
+            return_attention_mask=False,
+        )
+        bm25_batch_p = tokenizer(
+            tokenizer.cls_token + examples["bm25_hard"]["context"],
+            add_special_tokens=False,
+            return_token_type_ids=False,
+            return_attention_mask=False,
+        )
+        bm25_batch_q = tokenizer(
+            tokenizer.cls_token + examples["bm25_hard"]["question"],
+            add_special_tokens=False,
+            return_token_type_ids=False,
+            return_attention_mask=False,
+        )
+        bm25_tokenized_answer = tokenizer(
+            examples["bm25_hard"]["answer"],
+            add_special_tokens=False,
+            return_token_type_ids=False,
+            return_attention_mask=False,
+        )
+        tokenized_answer = tokenizer(
+            examples["answer"], add_special_tokens=False, return_token_type_ids=False, return_attention_mask=False
+        )
+        examples["batch_p_input_ids"] = batch_p["input_ids"]
+        examples["batch_q_input_ids"] = batch_q["input_ids"]
+        examples["labels"] = tokenized_answer["input_ids"]
+        examples["bm25_batch_p_input_ids"] = bm25_batch_p["input_ids"]
+        examples["bm25_batch_q_input_ids"] = bm25_batch_q["input_ids"]
+        examples["bm25_labels"] = bm25_tokenized_answer["input_ids"]
         examples["bm25_answer"] = examples["bm25_hard"]["answer"]
 
         return examples
 
     train_dataset = JsonlDataset("./raw_data/train/klue_data_bm25.json", transform=preprocess)
-    # Kaggle author Test Final RMSE: 0.06539
     eval_dataset = JsonlDataset("./raw_data/dev/klue_data.json", transform=preprocess)
 
     custom_train_sampler = DistributedUniqueSampler(
@@ -387,7 +396,12 @@ def main(hparams: TrainingArguments):
         seed=hparams.seed,
     )
     custom_eval_sampler = DistributedSampler(
-        dataset=eval_dataset, num_replicas=world_size, rank=local_rank, seed=hparams.seed, drop_last=True
+        dataset=eval_dataset,
+        num_replicas=world_size,
+        rank=local_rank,
+        seed=hparams.seed,
+        drop_last=True,
+        shuffle=False,
     )
 
     test = list(custom_train_sampler.__iter__())
@@ -400,8 +414,7 @@ def main(hparams: TrainingArguments):
     # example np_dataset is already set (feature)7:1(label), so, it can be all shuffle `True` between sampler and dataloader
     train_dataloader = CustomDataLoader(
         dataset=train_dataset,
-        feature_column_name=hparams.feature_column_name,
-        labels_column_name=hparams.labels_column_name,
+        tokenizer=tokenizer,
         batch_size=hparams.per_device_train_batch_size,
         sampler=custom_train_sampler,
         num_workers=hparams.num_workers,
@@ -412,8 +425,7 @@ def main(hparams: TrainingArguments):
 
     eval_dataloader = CustomDataLoader(
         dataset=eval_dataset,
-        feature_column_name=hparams.feature_column_name,
-        labels_column_name=hparams.labels_column_name,
+        tokenizer=tokenizer,
         batch_size=hparams.per_device_eval_batch_size,
         sampler=custom_eval_sampler,
         num_workers=hparams.num_workers,
@@ -440,14 +452,14 @@ def main(hparams: TrainingArguments):
     # and BF16 `auto_cast` is not supported now (https://github.com/microsoft/DeepSpeed/issues/4772) it is manually implement too.
     # The optimizer will use zero_optimizer as normal, and the grad_scaler is expected to behave normally, since the id check is done.
     # https://github.com/microsoft/DeepSpeed/issues/4908
-    optimizer = torch.optim.AdamW(
+    optimizer = Adafactor(
         model.parameters(),
         lr=hparams.learning_rate,
-        eps=hparams.optim_eps,
-        betas=(hparams.optim_beta1, hparams.optim_beta2),
+        beta1=hparams.optim_beta1,
         weight_decay=hparams.weight_decay,
     )
-
+    if isinstance(optimizer, Adafactor):
+        cycle_momentum = False
     # TODO(user): If you want to using deepspeed lr_scheduler, change this code line
     # max_lr = hparams.learning_rate
     # initial_lr = hparams.learning_rate / hparams.div_factor
@@ -461,7 +473,7 @@ def main(hparams: TrainingArguments):
         div_factor=hparams.div_factor,
         final_div_factor=hparams.final_div_factor,
         steps_per_epoch=steps_per_epoch,
-        cycle_momentum=True,
+        cycle_momentum=cycle_momentum,
     )
 
     # If you want to using own optimizer and scheduler,

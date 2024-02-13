@@ -16,7 +16,6 @@ class Trainer(metaclass=ABCMeta):
     def __init__(
         self,
         device_id,
-        criterion,
         eval_metric=None,
         precision="fp32",
         cmd_logger=None,
@@ -58,7 +57,6 @@ class Trainer(metaclass=ABCMeta):
         self.device_id = device_id  # it is same rank
         self.device = torch.device("cuda:{}".format(device_id))
 
-        self.criterion = criterion
         self.eval_metric = eval_metric
 
         # in deepspeed, precision is just using model log for .pt file
