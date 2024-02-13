@@ -89,7 +89,8 @@ def make_bm25_hard(start_index, end_index, tot_ctxs, bm25, datasets, train_list,
                 if data["answer"] != train_list[i]["answer"]:
                     train_list[i]["bm25_hard"] = copy.deepcopy(data)
                     break
-        output.append(train_list[i])
+        if train_list[i]["bm25_hard"]:
+            output.append(train_list[i])
 
 
 def main():

@@ -134,7 +134,8 @@ def make_bm25_hard(start_index, end_index, tot_ctxs, bm25, datasets, train_list,
                 if data["answer"] != train_list[i]["answer"]:
                     train_list[i]["bm25_hard"] = copy.deepcopy(data)
                     break
-        output.append(train_list[i])
+        if train_list[i]["bm25_hard"]:
+            output.append(train_list[i])
 
 def main():
     TRAIN_DATASETS_TEMPLATES_01 = [
@@ -160,7 +161,7 @@ def main():
         num_processes = mp.cpu_count()
         file_name, exp = train_output.split(".")
         preproc_split = file_name.split("_")[:2]
-        preproc_output = "_".join(preproc_split)+"_preproc_mp."+exp
+        preproc_output = "_".join(preproc_split) + "_preproc_mp." + exp
         if not os.path.exists(os.path.join(train_dir, preproc_output)):
             data = list()
 
@@ -230,28 +231,20 @@ def main():
     valid_dir = "./raw_data/dev"
     valid_output = "dev_data.json"
     if not os.path.exists(os.path.join(valid_dir, valid_output)):
+        data = list()
         valid_list = []
         valid_error_list = []
 
-        raw_preprocess(VALID_DATASETS_TEMPLATES_01, valid_dir, valid_list, valid_error_list)
+        for file_name in VALID_DATASETS_TEMPLATES_01:
+            with open(os.path.join(valid_dir, file_name), "r", encoding="utf-8") as f:
+                sample = json.load(f)
+            data.extend(sample["data"])
+
+        raw_preprocess(0, len(data), data, valid_list, valid_error_list)
         with open(os.path.join(valid_dir, valid_output), "w", encoding="utf-8") as file:
             file.write(json.dumps(valid_list, indent=4))
         with open(os.path.join(valid_dir, "error_data.json"), "w", encoding="utf-8") as file:
             file.write(json.dumps(valid_error_list, indent=4))
-
-    TEST_DATASETS_TEMPLATES_01 = []
-    TEST_DATASETS_TEMPLATES_02 = []
-
-    print("@@@@@@@@@@ test raw preprocess @@@@@@@@@@")
-    test_dir = "./raw_data/test"
-    test_output = "test_data.json"
-    if not os.path.exists(os.path.join(test_dir, test_output)):
-        test_list = []
-
-        raw_preprocess(TEST_DATASETS_TEMPLATES_01, test_dir, test_list)
-        with open(os.path.join(test_dir, test_output), "w", encoding="utf-8") as file:
-            file.write(json.dumps(test_list, indent=4))
-
 
 if __name__ == '__main__':
     main()

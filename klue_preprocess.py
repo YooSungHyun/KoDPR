@@ -114,7 +114,9 @@ def make_bm25_hard(start_index, end_index, tot_ctxs, bm25, datasets, train_list,
                 if data["answer"] != train_list[i]["answer"]:
                     train_list[i]["bm25_hard"] = copy.deepcopy(data)
                     break
-        output.append(train_list[i])
+        if train_list[i]["bm25_hard"]:
+            output.append(train_list[i])
+
 
 def main():
     print("@@@@@@@@@@ train raw preprocess @@@@@@@@@@")
@@ -135,7 +137,9 @@ def main():
             for idx in range(num_processes):
                 start_index = idx * chunk_size
                 end_index = min((idx + 1) * chunk_size, len(data))
-                p = mp.Process(target=raw_preprocess, args=(start_index, end_index, data, train_list, train_error_list))
+                p = mp.Process(
+                    target=raw_preprocess, args=(start_index, end_index, data, train_list, train_error_list)
+                )
                 processes.append(p)
                 p.start()
 
@@ -183,12 +187,14 @@ def main():
         valid_list = []
         valid_error_list = []
 
-        raw_preprocess(0, len(klue["validation"].to_list()), klue["validation"].to_list(), valid_list, valid_error_list)
+        raw_preprocess(
+            0, len(klue["validation"].to_list()), klue["validation"].to_list(), valid_list, valid_error_list
+        )
         with open(os.path.join(valid_dir, valid_output), "w", encoding="utf-8") as file:
             file.write(json.dumps(valid_list, indent=4))
         with open(os.path.join(valid_dir, "error_data.json"), "w", encoding="utf-8") as file:
             file.write(json.dumps(valid_error_list, indent=4))
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
