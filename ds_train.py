@@ -452,12 +452,20 @@ def main(hparams: TrainingArguments):
     # and BF16 `auto_cast` is not supported now (https://github.com/microsoft/DeepSpeed/issues/4772) it is manually implement too.
     # The optimizer will use zero_optimizer as normal, and the grad_scaler is expected to behave normally, since the id check is done.
     # https://github.com/microsoft/DeepSpeed/issues/4908
-    optimizer = Adafactor(
+    # optimizer = Adafactor(
+    #     model.parameters(),
+    #     lr=hparams.learning_rate,
+    #     beta1=hparams.optim_beta1,
+    #     weight_decay=hparams.weight_decay,
+    # )
+    optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=hparams.learning_rate,
-        beta1=hparams.optim_beta1,
+        eps=hparams.optim_eps,
+        betas=(hparams.optim_beta1, hparams.optim_beta2),
         weight_decay=hparams.weight_decay,
     )
+    cycle_momentum = True
     if isinstance(optimizer, Adafactor):
         cycle_momentum = False
     # TODO(user): If you want to using deepspeed lr_scheduler, change this code line

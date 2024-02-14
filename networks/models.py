@@ -8,6 +8,8 @@ class KobertBiEncoder(torch.nn.Module):
         super(KobertBiEncoder, self).__init__()
         self.passage_encoder = DebertaV2Model.from_pretrained("team-lucid/deberta-v3-base-korean")
         self.query_encoder = DebertaV2Model.from_pretrained("team-lucid/deberta-v3-base-korean")
+        self.passage_encoder.gradient_checkpointing_enable()
+        self.query_encoder.gradient_checkpointing_enable()
 
     def forward(self, batch, type: str = "passage") -> torch.FloatTensor:
         """passage 또는 query를 bert로 encoding합니다."""
