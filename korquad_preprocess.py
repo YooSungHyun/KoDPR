@@ -11,6 +11,7 @@ from utils.comfy import get_passage_file
 from rank_bm25 import BM25Okapi
 from datasets import Dataset
 import multiprocessing as mp
+import random
 
 tokenizer = AutoTokenizer.from_pretrained("team-lucid/deberta-v3-base-korean")
 MODEL_MAX_LENGTH = 512
@@ -73,6 +74,15 @@ def raw_preprocess(start_index, end_index, data, title_passage_map, output_list)
 
 
 def make_bm25_hard(start_index, end_index, tot_ctxs, bm25, datasets, train_list, output):
+    context_to_indices = {}
+
+    for index, item in enumerate(datasets):
+        context_value = item["context"]
+        if context_value in context_to_indices:
+            context_to_indices[context_value].append(index)
+        else:
+            context_to_indices[context_value] = [index]
+
     for i in tqdm(range(start_index, end_index), desc="hard bm25 making"):
         query = train_list[i]["question"]
 
@@ -83,11 +93,11 @@ def make_bm25_hard(start_index, end_index, tot_ctxs, bm25, datasets, train_list,
         for source in bm25_100:
             if train_list[i]["bm25_hard"]:
                 break
-            source_datas = datasets.filter(lambda x: x["context"] == source)
-            source_datas = source_datas.shuffle()
-            for data in source_datas:
-                if data["answer"] != train_list[i]["answer"]:
-                    train_list[i]["bm25_hard"] = copy.deepcopy(data)
+            source_indices = context_to_indices[source]
+            random.shuffle(source_indices)
+            for idx in source_indices:
+                if datasets[idx]["answer"] != train_list[i]["answer"]:
+                    train_list[i]["bm25_hard"] = copy.deepcopy(datasets[idx])
                     break
         if train_list[i]["bm25_hard"]:
             output.append(train_list[i])

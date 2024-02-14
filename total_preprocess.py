@@ -15,6 +15,15 @@ CHUNK_SIZE = 100
 
 
 def make_bm25_hard(start_index, end_index, tot_ctxs, bm25, datasets, train_list, output):
+    context_to_indices = {}
+
+    for index, item in enumerate(datasets):
+        context_value = item["context"]
+        if context_value in context_to_indices:
+            context_to_indices[context_value].append(index)
+        else:
+            context_to_indices[context_value] = [index]
+
     for i in tqdm(range(start_index, end_index), desc="hard bm25 making"):
         query = train_list[i]["question"]
 
@@ -25,11 +34,11 @@ def make_bm25_hard(start_index, end_index, tot_ctxs, bm25, datasets, train_list,
         for source in bm25_100:
             if train_list[i]["bm25_hard"]:
                 break
-            source_datas = datasets.filter(lambda x: x["context"] == source)
-            source_datas = source_datas.shuffle()
-            for data in source_datas:
-                if data["answer"] != train_list[i]["answer"]:
-                    train_list[i]["bm25_hard"] = copy.deepcopy(data)
+            source_indices = context_to_indices[source]
+            random.shuffle(source_indices)
+            for idx in source_indices:
+                if datasets[idx]["answer"] != train_list[i]["answer"]:
+                    train_list[i]["bm25_hard"] = copy.deepcopy(datasets[idx])
                     break
         if train_list[i]["bm25_hard"]:
             output.append(train_list[i])
@@ -38,14 +47,14 @@ def make_bm25_hard(start_index, end_index, tot_ctxs, bm25, datasets, train_list,
 def main():
     print("@@@@@@@@@@ train raw preprocess @@@@@@@@@@")
     train_dir = "./raw_data/train"
-    train_output = "total_preproc_bm25.json"
+    train_output = "total_preproc_bm25_all.json"
     if not os.path.exists(os.path.join(train_dir, train_output)):
         num_processes = mp.cpu_count()
         with open(os.path.join(train_dir, "total_preproc.json"), "r", encoding="utf-8") as f:
             train_list = json.load(f)
 
         random.shuffle(train_list)
-        train_list = train_list[:150000]
+        # train_list = train_list[:150000]
 
         output = mp.Manager().list()
         processes = []

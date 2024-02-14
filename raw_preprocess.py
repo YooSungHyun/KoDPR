@@ -7,6 +7,7 @@ from transformers import AutoTokenizer
 from rank_bm25 import BM25Okapi
 from datasets import Dataset
 import multiprocessing as mp
+import random
 
 tokenizer = AutoTokenizer.from_pretrained("team-lucid/deberta-v3-base-korean")
 MODEL_MAX_LENGTH = 512
@@ -109,15 +110,22 @@ def raw_preprocess(start_index, end_index, data, output_list, error_list):
                     qa["answers"]["text"].replace(" ", "")
                 ) == -1 and not all(item in temp_tokens for item in encoded_answer):
                     # 답변이 너무 긴 경우 다 잘려나간다.
-                    print(
-                        f"{qa['answers']['text']}, {tokenizer.decode(tokens)}\n\n{tokenizer.decode(temp_tokens)}"
-                    )
+                    print(f"{qa['answers']['text']}, {tokenizer.decode(tokens)}\n\n{tokenizer.decode(temp_tokens)}")
                     error_list.append(copy.deepcopy(data_dict))
                 else:
                     output_list.append(copy.deepcopy(data_dict))
 
 
 def make_bm25_hard(start_index, end_index, tot_ctxs, bm25, datasets, train_list, output):
+    context_to_indices = {}
+
+    for index, item in enumerate(datasets):
+        context_value = item["context"]
+        if context_value in context_to_indices:
+            context_to_indices[context_value].append(index)
+        else:
+            context_to_indices[context_value] = [index]
+
     for i in tqdm(range(start_index, end_index), desc="hard bm25 making"):
         query = train_list[i]["question"]
 
@@ -128,14 +136,15 @@ def make_bm25_hard(start_index, end_index, tot_ctxs, bm25, datasets, train_list,
         for source in bm25_100:
             if train_list[i]["bm25_hard"]:
                 break
-            source_datas = datasets.filter(lambda x: x["context"] == source)
-            source_datas = source_datas.shuffle()
-            for data in source_datas:
-                if data["answer"] != train_list[i]["answer"]:
-                    train_list[i]["bm25_hard"] = copy.deepcopy(data)
+            source_indices = context_to_indices[source]
+            random.shuffle(source_indices)
+            for idx in source_indices:
+                if datasets[idx]["answer"] != train_list[i]["answer"]:
+                    train_list[i]["bm25_hard"] = copy.deepcopy(datasets[idx])
                     break
         if train_list[i]["bm25_hard"]:
             output.append(train_list[i])
+
 
 def main():
     TRAIN_DATASETS_TEMPLATES_01 = [
@@ -176,7 +185,9 @@ def main():
             for idx in range(num_processes):
                 start_index = idx * chunk_size
                 end_index = min((idx + 1) * chunk_size, len(data))
-                p = mp.Process(target=raw_preprocess, args=(start_index, end_index, data, train_list, train_error_list))
+                p = mp.Process(
+                    target=raw_preprocess, args=(start_index, end_index, data, train_list, train_error_list)
+                )
                 processes.append(p)
                 p.start()
 
@@ -188,7 +199,9 @@ def main():
 
             with open(os.path.join(train_dir, preproc_output), "w", encoding="utf-8") as file:
                 file.write(json.dumps(train_list, indent=4))
-            with open(os.path.join(train_dir, f"{'_'.join(preproc_split)}_error_mp.json"), "w", encoding="utf-8") as file:
+            with open(
+                os.path.join(train_dir, f"{'_'.join(preproc_split)}_error_mp.json"), "w", encoding="utf-8"
+            ) as file:
                 file.write(json.dumps(error_list, indent=4))
         else:
             with open(os.path.join(train_dir, preproc_output), "r", encoding="utf-8") as f:
@@ -204,7 +217,9 @@ def main():
         for idx in range(num_processes):
             start_index = idx * chunk_size
             end_index = min((idx + 1) * chunk_size, len(train_list))
-            p = mp.Process(target=make_bm25_hard, args=(start_index, end_index, tot_ctxs, bm25, datasets, train_list, output))
+            p = mp.Process(
+                target=make_bm25_hard, args=(start_index, end_index, tot_ctxs, bm25, datasets, train_list, output)
+            )
             processes.append(p)
             p.start()
         for child in processes:
@@ -246,5 +261,6 @@ def main():
         with open(os.path.join(valid_dir, "error_data.json"), "w", encoding="utf-8") as file:
             file.write(json.dumps(valid_error_list, indent=4))
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()
