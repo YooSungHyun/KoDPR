@@ -11,9 +11,6 @@ class JsonlDataset(CustomDataset):
             self.jsonl = json.load(f)
         self.transform = transform
 
-    def shuffle(self):
-        random.shuffle(self.jsonl)
-
     def __len__(self):
         return len(self.jsonl)
 

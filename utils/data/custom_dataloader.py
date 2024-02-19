@@ -13,13 +13,12 @@ class CustomDataLoader(torch.utils.data.DataLoader):
 
     def _collate_fn(self, batch):
         p_input_ids = [{"input_ids": v["batch_p_input_ids"]} for v in batch]
-        bm25_p_input_ids = [{"input_ids": v["bm25_batch_p_input_ids"]} for v in batch]
-        p_input_ids.extend(bm25_p_input_ids)
         q_input_ids = [{"input_ids": v["batch_q_input_ids"]} for v in batch]
-        bm25_q_input_ids = [{"input_ids": v["bm25_batch_q_input_ids"]} for v in batch]
-        q_input_ids.extend(bm25_q_input_ids)
 
         batch_p = self.tokenizer.pad(p_input_ids, return_tensors="pt")
         batch_q = self.tokenizer.pad(q_input_ids, return_tensors="pt")
 
         return batch_p, batch_q
+
+    def __len__(self):
+        return len(self.sampler)

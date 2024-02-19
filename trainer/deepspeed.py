@@ -224,6 +224,8 @@ class Trainer(metaclass=ABCMeta):
             # check if optimizer should step in gradient accumulation
             should_optim_step = self.global_step % self.grad_accum_steps == 0
             global_loss = 0
+            global_correct = 0
+            global_bsz = 0
             if should_optim_step:
                 # currently only supports a single optimizer
                 def on_before_optimizer_step(optimizer, opt_idx):
@@ -231,14 +233,18 @@ class Trainer(metaclass=ABCMeta):
 
                 on_before_optimizer_step(optimizer, 0)
                 # optimizer step runs train step internally through closure
-                loss = self.training_step(model=model, batch=batch, batch_idx=batch_idx)
-                global_loss += loss
+                log_output = self.training_step(model=model, batch=batch, batch_idx=batch_idx)
+                global_loss += log_output["loss"]
+                global_correct += log_output["correct"]
+                global_bsz += log_output["bsz"]
                 mean_global_loss = global_loss / self.grad_accum_steps
+                global_acc = global_correct / global_bsz
                 # global_step loss check
                 web_log_every_n(
                     self.web_logger,
                     {
-                        "train/global_step_loss": mean_global_loss,
+                        f"train/rank{self.device_id}_global_acc": global_acc,
+                        f"train/rank{self.device_id}_global_loss": mean_global_loss,
                         "train/global_step": self.global_step,
                         "train/epoch": self.current_epoch,
                     },
@@ -257,8 +263,10 @@ class Trainer(metaclass=ABCMeta):
                 # on_before_zero_grad(optimizer)
             else:
                 # gradient accumulation -> no optimizer step
-                loss = self.training_step(model=model, batch=batch, batch_idx=batch_idx)
-                global_loss += loss
+                log_output = self.training_step(model=model, batch=batch, batch_idx=batch_idx)
+                global_loss += log_output["loss"]
+                global_correct += log_output["correct"]
+                global_bsz += log_output["bsz"]
 
             def on_train_batch_end(outputs, batch, batch_idx):
                 pass

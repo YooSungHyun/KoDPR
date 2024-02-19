@@ -5,8 +5,6 @@ from logging import StreamHandler
 from typing import Optional, Union
 
 import deepspeed
-import numpy as np
-import pandas as pd
 import torch
 import torch.distributed as dist
 from torch.utils.data import DistributedSampler
@@ -28,7 +26,7 @@ from utils.comfy import (
 from transformers import AutoTokenizer
 from utils.data.jsonl_dataset import JsonlDataset
 from utils.data.custom_dataloader import CustomDataLoader
-from utils.data.custom_sampler import DistributedUniqueSampler
+from utils.data.custom_sampler import DistributedUniqueBM25Sampler
 from torch.cuda.amp import autocast
 from torch_optimizer import Adafactor
 from transformers import DebertaV2Model, DebertaV2Config
@@ -354,41 +352,15 @@ def main(hparams: TrainingArguments):
             return_token_type_ids=False,
             return_attention_mask=False,
         )
-        bm25_batch_p = tokenizer(
-            tokenizer.cls_token + examples["bm25_hard"]["context"],
-            add_special_tokens=False,
-            return_token_type_ids=False,
-            return_attention_mask=False,
-        )
-        bm25_batch_q = tokenizer(
-            tokenizer.cls_token + examples["bm25_hard"]["question"],
-            add_special_tokens=False,
-            return_token_type_ids=False,
-            return_attention_mask=False,
-        )
-        bm25_tokenized_answer = tokenizer(
-            examples["bm25_hard"]["answer"],
-            add_special_tokens=False,
-            return_token_type_ids=False,
-            return_attention_mask=False,
-        )
-        tokenized_answer = tokenizer(
-            examples["answer"], add_special_tokens=False, return_token_type_ids=False, return_attention_mask=False
-        )
         examples["batch_p_input_ids"] = batch_p["input_ids"]
         examples["batch_q_input_ids"] = batch_q["input_ids"]
-        examples["labels"] = tokenized_answer["input_ids"]
-        examples["bm25_batch_p_input_ids"] = bm25_batch_p["input_ids"]
-        examples["bm25_batch_q_input_ids"] = bm25_batch_q["input_ids"]
-        examples["bm25_labels"] = bm25_tokenized_answer["input_ids"]
-        examples["bm25_answer"] = examples["bm25_hard"]["answer"]
 
         return examples
 
     train_dataset = JsonlDataset("./raw_data/train/klue_data_bm25idx.json", transform=preprocess)
     eval_dataset = JsonlDataset("./raw_data/dev/klue_data.json", transform=preprocess)
 
-    custom_train_sampler = DistributedUniqueSampler(
+    custom_train_sampler = DistributedUniqueBM25Sampler(
         dataset=train_dataset,
         batch_size=hparams.per_device_train_batch_size,
         tokenizer=tokenizer,
@@ -404,7 +376,7 @@ def main(hparams: TrainingArguments):
         drop_last=True,
         shuffle=False,
     )
-
+    hparams.per_device_train_batch_size = hparams.per_device_train_batch_size * 2
     test = list(custom_train_sampler.__iter__())
     for i in range(0, len(test), hparams.per_device_train_batch_size):
         assert len(set(train_dataset[test[i : i + hparams.per_device_train_batch_size]]["answer"])) == len(
@@ -439,14 +411,8 @@ def main(hparams: TrainingArguments):
     # accumulation is always floor
     steps_per_epoch = math.floor(len(train_dataloader) / hparams.accumulate_grad_batches)
 
-    p_config = DebertaV2Config.from_pretrained("team-lucid/deberta-v3-base-korean")
-    q_config = DebertaV2Config.from_pretrained("team-lucid/deberta-v3-base-korean")
-    p_encoder = DebertaV2Model(config=p_config)
-    q_encoder = DebertaV2Model(config=q_config)
-    p_base = torch.load("./model_base/pytorch_model.bin")
-    q_base = torch.load("./model_base/pytorch_model.bin")
-    p_encoder.load_state_dict(p_base)
-    q_encoder.load_state_dict(q_base)
+    p_encoder = DebertaV2Model.from_pretrained("./model_base/kor_nli_1_epoch")
+    q_encoder = DebertaV2Model.from_pretrained("./model_base/kor_nli_1_epoch")
 
     # Instantiate objects
     model = KobertBiEncoder(passage_encoder=p_encoder, query_encoder=q_encoder).cuda(local_rank)

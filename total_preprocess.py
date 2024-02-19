@@ -24,22 +24,20 @@ def make_bm25_hard(start_index, end_index, tot_ctxs, bm25, datasets, train_list,
         else:
             context_to_indices[context_value] = [index]
 
-    for i in tqdm(range(start_index, end_index), desc="hard bm25 making"):
+    for i in tqdm(range(start_index, end_index + 1), desc="hard bm25 making"):
         query = train_list[i]["question"]
 
         tokenized_query = tokenizer.tokenize(query)
         bm25_100 = bm25.get_top_n(tokenized_query, tot_ctxs, n=100)
 
-        train_list[i]["bm25_hard"] = dict()
+        train_list[i]["bm25_hard"] = list()
         for source in bm25_100:
-            if train_list[i]["bm25_hard"]:
-                break
             source_indices = context_to_indices[source]
-            random.shuffle(source_indices)
             for idx in source_indices:
                 if datasets[idx]["answer"] != train_list[i]["answer"]:
-                    train_list[i]["bm25_hard"] = copy.deepcopy(datasets[idx])
-                    break
+                    # bm25에 대한 정답이 다른 모든 passage를 저장함.
+                    train_list[i]["bm25_hard"].append(source)
+
         if train_list[i]["bm25_hard"]:
             output.append(train_list[i])
 
@@ -47,14 +45,14 @@ def make_bm25_hard(start_index, end_index, tot_ctxs, bm25, datasets, train_list,
 def main():
     print("@@@@@@@@@@ train raw preprocess @@@@@@@@@@")
     train_dir = "./raw_data/train"
-    train_output = "total_preproc_bm25_all.json"
+    train_output = "total_preproc_bm25idx.json"
     if not os.path.exists(os.path.join(train_dir, train_output)):
         num_processes = mp.cpu_count()
         with open(os.path.join(train_dir, "total_preproc.json"), "r", encoding="utf-8") as f:
             train_list = json.load(f)
 
         random.shuffle(train_list)
-        # train_list = train_list[:150000]
+        train_list = train_list[:150000]
 
         output = mp.Manager().list()
         processes = []
