@@ -114,7 +114,6 @@ class Trainer(metaclass=ABCMeta):
         scheduler_cfg: Optional[Mapping],
         train_loader: torch.utils.data.DataLoader,
         val_loader: torch.utils.data.DataLoader,
-        trainable_loss=None,
         ckpt_path: Optional[str] = None,
     ):
         """The main entrypoint of the trainer, triggering the actual training.
@@ -133,7 +132,6 @@ class Trainer(metaclass=ABCMeta):
             "model": model,
             "optimizer": optimizer,
             "scheduler_cfg": scheduler_cfg,
-            "trainable_loss": trainable_loss,
             "dtype": self.precision,
         }
 
@@ -184,7 +182,6 @@ class Trainer(metaclass=ABCMeta):
         scheduler_cfg: Optional[Mapping],
         train_loader: torch.utils.data.DataLoader,
         limit_batches: Union[int, float] = float("inf"),
-        trainable_loss=None,
     ):
         """The training loop running a single training epoch.
 

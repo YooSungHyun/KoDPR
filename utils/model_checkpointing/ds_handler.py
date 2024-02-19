@@ -52,15 +52,6 @@ def load_checkpoint(state: dict, checkpoint_filepath: str, logger=None):
     ):
         state["scheduler_cfg"]["scheduler"].load_state_dict(additional_state["scheduler"])
 
-    # trainable_loss
-    if (
-        "trainable_loss" in state.keys()
-        and state["trainable_loss"] is not None
-        and "trainable_loss" in additional_state.keys()
-        and additional_state["trainable_loss"] is not None
-    ):
-        state["trainable_loss"].load_state_dict(additional_state["trainable_loss"], strict=False)
-
     if logger is not None:
         logger.info(f"Loaded checkpoint '{model_path}' epoch: {current_epoch} global_step: {state['global_step']}")
 
@@ -74,7 +65,6 @@ def save_checkpoint(
     step: int,
     dtype: torch.dtype,
     checkpoint_filepath: str,
-    trainable_loss=None,
     logger=None,
 ):
     """Save model epoch, global step, state dict.
@@ -97,13 +87,6 @@ def save_checkpoint(
         else:
             scheduler_state_dict = scheduler_cfg["scheduler"].state_dict()
 
-    loss_state_dict = None
-    if trainable_loss is not None:
-        if hasattr(trainable_loss, "module"):
-            loss_state_dict = trainable_loss.module.state_dict()
-        else:
-            loss_state_dict = trainable_loss.state_dict()
-
     model.save_checkpoint(
         checkpoint_filepath,
         client_state={
@@ -111,7 +94,6 @@ def save_checkpoint(
             "global_step": global_step,
             "step": step,
             "scheduler": scheduler_state_dict,
-            "trainable_loss": loss_state_dict,
             "dtype": dtype,
         },
     )
@@ -193,7 +175,7 @@ def load_checkpoint_for_infer(
     ):
         state["scheduler_cfg"]["scheduler"].load_state_dict(checkpoint_dict["scheduler"])
 
-    # trainable_loss
+    # grad_scaler
     if (
         "grad_scaler" in state.keys()
         and state["grad_scaler"] is not None
@@ -201,15 +183,6 @@ def load_checkpoint_for_infer(
         and checkpoint_dict["grad_scaler"] is not None
     ):
         state.update({"grad_scaler": checkpoint_dict["grad_scaler"]})
-
-    # trainable_loss
-    if (
-        "trainable_loss" in state.keys()
-        and state["trainable_loss"] is not None
-        and "trainable_loss" in checkpoint_dict.keys()
-        and checkpoint_dict["trainable_loss"] is not None
-    ):
-        state["trainable_loss"].load_state_dict(checkpoint_dict["trainable_loss"], strict=False)
 
     # model
     assert "module" in checkpoint_dict, "checkpoint_dict must have model state dict."

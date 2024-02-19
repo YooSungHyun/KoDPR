@@ -45,14 +45,13 @@ def make_bm25_hard(start_index, end_index, tot_ctxs, bm25, datasets, train_list,
 def main():
     print("@@@@@@@@@@ train raw preprocess @@@@@@@@@@")
     train_dir = "./raw_data/train"
-    train_output = "total_preproc_bm25idx.json"
+    train_output = "korquad_klue_bm25idx.json"
     if not os.path.exists(os.path.join(train_dir, train_output)):
         num_processes = mp.cpu_count()
-        with open(os.path.join(train_dir, "total_preproc.json"), "r", encoding="utf-8") as f:
+        with open(os.path.join(train_dir, "korquad_klue_preproc.json"), "r", encoding="utf-8") as f:
             train_list = json.load(f)
 
         random.shuffle(train_list)
-        train_list = train_list[:150000]
 
         output = mp.Manager().list()
         processes = []
