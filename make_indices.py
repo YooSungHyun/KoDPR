@@ -10,7 +10,7 @@ from tqdm import tqdm
 if __name__ == "__main__":
 
     BATCH_SIZE = 128
-    EPOCH = 200
+    EPOCH = 400
     NUM_REPLICAS = 4
     tokenizer = AutoTokenizer.from_pretrained("team-lucid/deberta-v3-base-korean")
     output_name = "./raw_data/train/korquad_klue_bm25_sampler_indices.json"
@@ -54,7 +54,7 @@ if __name__ == "__main__":
     chunk_size = max(EPOCH // num_processes, 1)
     for idx in range(num_processes):
         start_index = (idx * chunk_size) + start_point
-        end_index = min(((idx + 1) * chunk_size) + start_point, EPOCH)
+        end_index = min(((idx + 1) * chunk_size) + start_point, start_point + EPOCH)
         p = mp.Process(target=custom_train_sampler.__make_indices__, args=(start_index, end_index, train_list))
         processes.append(p)
         p.start()
