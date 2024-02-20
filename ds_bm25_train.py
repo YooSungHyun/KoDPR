@@ -226,7 +226,7 @@ class DSTrainer(Trainer):
 
             # contrastive loss는 배치의 index로 label을 정하기 때문에, 무작정 gather하면 label이 안맞는 현상이 발생할 수 있다.
             tot_batch_loss.append(loss.to(metric_on_device))
-            tot_batch_size.append(bsz.to(metric_on_device))
+            tot_batch_size.append(bsz)
             tot_batch_corr.append(correct.to(metric_on_device))
 
             log_output = {"loss": loss, "correct": correct, "bsz": bsz}
@@ -260,10 +260,12 @@ class DSTrainer(Trainer):
         # TODO(User): Create any form you want to output to wandb!
         def on_validation_epoch_end(tot_batch_loss, tot_batch_size, tot_batch_corr, metric_device):
             # if you want to see all_reduce example, see `fsdp_train.py`'s eval_loop
-            tot_batch_loss = torch.cat(tot_batch_loss, dim=0)
-            tot_batch_size = dist.all_reduce(tot_batch_size, dist.ReduceOp.SUM)
+            tot_batch_loss = torch.stack(tot_batch_loss)
+            tot_batch_size = torch.tensor(tot_batch_size, device=metric_device)
+            dist.all_reduce(tot_batch_size, dist.ReduceOp.SUM)
             tot_batch_size = torch.sum(tot_batch_size)
-            tot_batch_corr = dist.all_reduce(tot_batch_corr, dist.ReduceOp.SUM)
+            tot_batch_corr = torch.stack(tot_batch_corr)
+            dist.all_reduce(tot_batch_corr, dist.ReduceOp.SUM)
             tot_batch_corr = torch.sum(tot_batch_corr)
             # all_gather` requires a `fixed length tensor` as input.
             # Since the length of the data on each GPU may be different, the length should be passed to `all_gather` first.
@@ -278,8 +280,7 @@ class DSTrainer(Trainer):
 
             # Create a fixed length tensor with the length of `all_gather`.
             loss_gathered_data = [
-                torch.zeros((size.item(), tot_batch_loss.size(-1)), dtype=tot_batch_loss.dtype, device=metric_device)
-                for size in size_list
+                torch.zeros(size.item(), dtype=tot_batch_loss.dtype, device=metric_device) for size in size_list
             ]
 
             # Collect and match data from all GPUs.
@@ -290,8 +291,8 @@ class DSTrainer(Trainer):
                 dist.all_gather(loss_gathered_data, tot_batch_loss)
 
             # example 4 gpus : [gpu0[tensor],gpu1[tensor],gpu2[tensor],gpu3[tensor]]
-            logits_gathered_data = torch.cat(loss_gathered_data, dim=0)
-            epoch_loss = torch.mean(logits_gathered_data)
+            loss_gathered_data = torch.cat(loss_gathered_data, dim=0)
+            epoch_loss = torch.mean(loss_gathered_data)
             # epoch monitoring is must doing every epoch
             web_log_every_n(
                 self.web_logger,
@@ -356,8 +357,8 @@ def main(hparams: TrainingArguments):
 
         return examples
 
-    train_dataset = JsonlDataset("./raw_data/train/klue_data_bm25idx.json", transform=preprocess)
-    eval_dataset = JsonlDataset("./raw_data/dev/klue_data.json", transform=preprocess)
+    train_dataset = JsonlDataset(hparams.train_datasets_path, transform=preprocess)
+    eval_dataset = JsonlDataset(hparams.eval_datasets_path, transform=preprocess)
 
     custom_train_sampler = DistributedUniqueBM25Sampler(
         dataset=train_dataset,
@@ -368,12 +369,7 @@ def main(hparams: TrainingArguments):
         seed=hparams.seed,
     )
     custom_eval_sampler = DistributedSampler(
-        dataset=eval_dataset,
-        num_replicas=world_size,
-        rank=local_rank,
-        seed=hparams.seed,
-        drop_last=True,
-        shuffle=False,
+        dataset=eval_dataset, num_replicas=world_size, rank=local_rank, seed=hparams.seed, shuffle=False
     )
     hparams.per_device_train_batch_size = hparams.per_device_train_batch_size * 2
     test = list(custom_train_sampler.__iter__())
@@ -462,8 +458,6 @@ def main(hparams: TrainingArguments):
     # If you want to using own optimizer and scheduler,
     # check config `zero_allow_untested_optimizer` and `zero_force_ds_cpu_optimizer`
     ds_config = json_to_dict(hparams.deepspeed_config)
-
-    assert int(ds_config["zero_optimization"]["stage"]) != 3, "zero3는 현재 저장단에서 지원하지 않습니다!"
 
     update_auto_nested_dict(ds_config, "lr", initial_lr)
     update_auto_nested_dict(ds_config, "train_micro_batch_size_per_gpu", hparams.per_device_train_batch_size)
@@ -555,6 +549,7 @@ def main(hparams: TrainingArguments):
     )
     tokenizer.save_pretrained(hparams.output_dir)
     DebertaV2Config.from_pretrained(hparams.transformers_model_name).save_pretrained(hparams.output_dir)
+    trainer.eval_loop(model=model, val_loader=eval_dataloader)
     trainer.fit(
         model=model,
         optimizer=optimizer,

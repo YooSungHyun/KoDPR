@@ -240,8 +240,8 @@ class Trainer(metaclass=ABCMeta):
                 web_log_every_n(
                     self.web_logger,
                     {
-                        f"train/rank{self.device_id}_global_acc": global_acc,
-                        f"train/rank{self.device_id}_global_loss": mean_global_loss,
+                        "train/global_acc": global_acc,
+                        "train/global_loss": mean_global_loss,
                         "train/global_step": self.global_step,
                         "train/epoch": self.current_epoch,
                     },

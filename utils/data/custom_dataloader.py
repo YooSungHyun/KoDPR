@@ -1,5 +1,5 @@
 import torch
-from torch.nn.utils.rnn import pad_sequence
+import math
 
 
 class CustomDataLoader(torch.utils.data.DataLoader):
@@ -21,4 +21,5 @@ class CustomDataLoader(torch.utils.data.DataLoader):
         return batch_p, batch_q
 
     def __len__(self):
-        return len(self.sampler)
+        length = math.ceil(len(self.sampler) / self.batch_size)
+        return length

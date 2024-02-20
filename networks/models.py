@@ -6,7 +6,9 @@ class KobertBiEncoder(torch.nn.Module):
     def __init__(self, passage_encoder, query_encoder):
         super(KobertBiEncoder, self).__init__()
         self.passage_encoder = passage_encoder
+        self.passage_encoder.gradient_checkpointing_enable()
         self.query_encoder = query_encoder
+        self.query_encoder.gradient_checkpointing_enable()
 
     def forward(self, batch, type: str = "passage") -> torch.FloatTensor:
         """passage 또는 query를 bert로 encoding합니다."""

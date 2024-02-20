@@ -5,8 +5,6 @@ from logging import StreamHandler
 from typing import Optional, Union
 
 import deepspeed
-import numpy as np
-import pandas as pd
 import torch
 import torch.distributed as dist
 from torch.utils.data import DistributedSampler
@@ -141,9 +139,8 @@ class DSTrainer(Trainer):
         web_log_every_n(
             self.web_logger,
             {
-                f"train/rank{self.device_id}_loss": self._current_train_return["loss"],
-                f"train/rank{self.device_id}_acc": self._current_train_return["correct"]
-                / self._current_train_return["bsz"],
+                "train/loss": self._current_train_return["loss"],
+                "train/acc": self._current_train_return["correct"] / self._current_train_return["bsz"],
                 "train/step": self.step,
                 "train/global_step": self.global_step,
                 "train/epoch": self.current_epoch,
@@ -191,7 +188,9 @@ class DSTrainer(Trainer):
             pbar = enumerate(val_loader)
 
         eval_step = 0
-        tot_batch_logits = list()
+        tot_batch_loss = list()
+        tot_batch_size = list()
+        tot_batch_corr = list()
 
         if self.metric_on_cpu:
             metric_on_device = torch.device("cpu")
@@ -218,25 +217,19 @@ class DSTrainer(Trainer):
             with autocast(enabled=self.mixed_precision, dtype=self.precision):
                 # if self.precision == torch.bfloat16:
                 # tensor_dict_to_dtype(batch, self.precision)
-
-                q, q_mask, _, p, p_mask = batch
-                q, q_mask, p, p_mask = (
-                    q.to(self.device),
-                    q_mask.to(self.device),
-                    p.to(self.device),
-                    p_mask.to(self.device),
-                )
-                q_emb = self.model(q, q_mask, "query")  # bsz x bert_dim
-                p_emb = self.model(p, p_mask, "passage")  # bsz x bert_dim
+                batch_p, batch_q = batch
+                p_emb = model(batch_p, "passage")  # bsz x bert_dim
+                q_emb = model(batch_q, "query")  # bsz x bert_dim
                 pred = torch.matmul(q_emb, p_emb.T)  # bsz x bsz
                 loss = self.ibn_loss(pred)
-                acc = self.batch_acc(pred)
+                correct, bsz = self.batch_acc(pred)
 
             # contrastive loss는 배치의 index로 label을 정하기 때문에, 무작정 gather하면 label이 안맞는 현상이 발생할 수 있다.
-            #
-            tot_batch_logits.append(pred.to(metric_on_device))
+            tot_batch_loss.append(loss.to(metric_on_device))
+            tot_batch_size.append(bsz)
+            tot_batch_corr.append(correct.to(metric_on_device))
 
-            log_output = {"loss": loss, "acc": acc}
+            log_output = {"loss": loss, "correct": correct, "bsz": bsz}
             # avoid gradients in stored/accumulated values -> prevents potential OOM
             self._current_val_return = apply_to_collection(
                 log_output, torch.Tensor, lambda x: x.detach().to(metric_on_device)
@@ -251,7 +244,7 @@ class DSTrainer(Trainer):
                 self.web_logger,
                 {
                     "eval_step/loss": self._current_val_return["loss"],
-                    "eval_step/acc": self._current_val_return["acc"],
+                    "eval_step/acc": self._current_val_return["correct"] / self._current_val_return["bsz"],
                     "eval_step/step": eval_step,
                     "eval_step/global_step": self.global_step,
                     "eval_step/epoch": self.current_epoch,
@@ -265,13 +258,18 @@ class DSTrainer(Trainer):
             eval_step += 1
 
         # TODO(User): Create any form you want to output to wandb!
-        def on_validation_epoch_end(tot_batch_logits, metric_device):
+        def on_validation_epoch_end(tot_batch_loss, tot_batch_size, tot_batch_corr, metric_device):
             # if you want to see all_reduce example, see `fsdp_train.py`'s eval_loop
-            tot_batch_logits = torch.cat(tot_batch_logits, dim=0)
-
+            tot_batch_loss = torch.stack(tot_batch_loss)
+            tot_batch_size = torch.tensor(tot_batch_size, device=metric_device)
+            dist.all_reduce(tot_batch_size, dist.ReduceOp.SUM)
+            tot_batch_size = torch.sum(tot_batch_size)
+            tot_batch_corr = torch.stack(tot_batch_corr)
+            dist.all_reduce(tot_batch_corr, dist.ReduceOp.SUM)
+            tot_batch_corr = torch.sum(tot_batch_corr)
             # all_gather` requires a `fixed length tensor` as input.
             # Since the length of the data on each GPU may be different, the length should be passed to `all_gather` first.
-            local_size = torch.tensor([tot_batch_logits.size(0)], dtype=torch.long, device=metric_device)
+            local_size = torch.tensor([tot_batch_loss.size(0)], dtype=torch.long, device=metric_device)
             size_list = [
                 torch.tensor([0], dtype=torch.long, device=metric_device) for _ in range(dist.get_world_size())
             ]
@@ -281,34 +279,34 @@ class DSTrainer(Trainer):
                 dist.all_gather(size_list, local_size)
 
             # Create a fixed length tensor with the length of `all_gather`.
-            logits_gathered_data = [
-                torch.zeros(
-                    (size.item(), tot_batch_logits.size(-1)), dtype=tot_batch_logits.dtype, device=metric_device
-                )
-                for size in size_list
+            loss_gathered_data = [
+                torch.zeros(size.item(), dtype=tot_batch_loss.dtype, device=metric_device) for size in size_list
             ]
 
             # Collect and match data from all GPUs.
             if metric_device == torch.device("cpu"):
                 # Collect and match data from all GPUs.
-                dist.all_gather_object(logits_gathered_data, tot_batch_logits)
+                dist.all_gather_object(loss_gathered_data, tot_batch_loss)
             else:
-                dist.all_gather(logits_gathered_data, tot_batch_logits)
+                dist.all_gather(loss_gathered_data, tot_batch_loss)
 
             # example 4 gpus : [gpu0[tensor],gpu1[tensor],gpu2[tensor],gpu3[tensor]]
-            logits_gathered_data = torch.cat(logits_gathered_data, dim=0)
-            epoch_loss = self.ibn_loss(logits_gathered_data)
-            epoch_rmse = torch.sqrt(epoch_loss)
+            loss_gathered_data = torch.cat(loss_gathered_data, dim=0)
+            epoch_loss = torch.mean(loss_gathered_data)
             # epoch monitoring is must doing every epoch
             web_log_every_n(
                 self.web_logger,
-                {"eval/loss": epoch_rmse, "eval/epoch": self.current_epoch},
+                {
+                    "eval/loss": epoch_loss,
+                    "eval_step/acc": tot_batch_corr / tot_batch_size,
+                    "eval/epoch": self.current_epoch,
+                },
                 self.current_epoch,
                 1,
                 self.device_id,
             )
 
-        on_validation_epoch_end(tot_batch_logits, metric_on_device)
+        on_validation_epoch_end(tot_batch_loss, tot_batch_size, tot_batch_corr, metric_on_device)
 
         def on_validation_model_train(model):
             torch.set_grad_enabled(True)
@@ -338,7 +336,7 @@ def main(hparams: TrainingArguments):
     if local_rank == 0:
         web_logger = wandb.init(config=hparams)
 
-    tokenizer = AutoTokenizer.from_pretrained("team-lucid/deberta-v3-base-korean")
+    tokenizer = AutoTokenizer.from_pretrained(hparams.transformers_model_name)
 
     def preprocess(examples):
         # deberta는 cls, sep(eos) 자동으로 넣어줌
@@ -354,39 +352,13 @@ def main(hparams: TrainingArguments):
             return_token_type_ids=False,
             return_attention_mask=False,
         )
-        bm25_batch_p = tokenizer(
-            tokenizer.cls_token + examples["bm25_hard"]["context"],
-            add_special_tokens=False,
-            return_token_type_ids=False,
-            return_attention_mask=False,
-        )
-        bm25_batch_q = tokenizer(
-            tokenizer.cls_token + examples["bm25_hard"]["question"],
-            add_special_tokens=False,
-            return_token_type_ids=False,
-            return_attention_mask=False,
-        )
-        bm25_tokenized_answer = tokenizer(
-            examples["bm25_hard"]["answer"],
-            add_special_tokens=False,
-            return_token_type_ids=False,
-            return_attention_mask=False,
-        )
-        tokenized_answer = tokenizer(
-            examples["answer"], add_special_tokens=False, return_token_type_ids=False, return_attention_mask=False
-        )
         examples["batch_p_input_ids"] = batch_p["input_ids"]
         examples["batch_q_input_ids"] = batch_q["input_ids"]
-        examples["labels"] = tokenized_answer["input_ids"]
-        examples["bm25_batch_p_input_ids"] = bm25_batch_p["input_ids"]
-        examples["bm25_batch_q_input_ids"] = bm25_batch_q["input_ids"]
-        examples["bm25_labels"] = bm25_tokenized_answer["input_ids"]
-        examples["bm25_answer"] = examples["bm25_hard"]["answer"]
 
         return examples
 
-    train_dataset = JsonlDataset("./raw_data/train/klue_data_bm25idx.json", transform=preprocess)
-    eval_dataset = JsonlDataset("./raw_data/dev/klue_data.json", transform=preprocess)
+    train_dataset = JsonlDataset(hparams.train_datasets_path, transform=preprocess)
+    eval_dataset = JsonlDataset(hparams.eval_datasets_path, transform=preprocess)
 
     custom_train_sampler = DistributedUniqueSampler(
         dataset=train_dataset,
@@ -397,14 +369,9 @@ def main(hparams: TrainingArguments):
         seed=hparams.seed,
     )
     custom_eval_sampler = DistributedSampler(
-        dataset=eval_dataset,
-        num_replicas=world_size,
-        rank=local_rank,
-        seed=hparams.seed,
-        drop_last=True,
-        shuffle=False,
+        dataset=eval_dataset, num_replicas=world_size, rank=local_rank, seed=hparams.seed, shuffle=False
     )
-
+    hparams.per_device_train_batch_size = hparams.per_device_train_batch_size * 2
     test = list(custom_train_sampler.__iter__())
     for i in range(0, len(test), hparams.per_device_train_batch_size):
         assert len(set(train_dataset[test[i : i + hparams.per_device_train_batch_size]]["answer"])) == len(
@@ -439,14 +406,8 @@ def main(hparams: TrainingArguments):
     # accumulation is always floor
     steps_per_epoch = math.floor(len(train_dataloader) / hparams.accumulate_grad_batches)
 
-    p_config = DebertaV2Config.from_pretrained("team-lucid/deberta-v3-base-korean")
-    q_config = DebertaV2Config.from_pretrained("team-lucid/deberta-v3-base-korean")
-    p_encoder = DebertaV2Model(config=p_config)
-    q_encoder = DebertaV2Model(config=q_config)
-    p_base = torch.load("./model_base/pytorch_model.bin")
-    q_base = torch.load("./model_base/pytorch_model.bin")
-    p_encoder.load_state_dict(p_base)
-    q_encoder.load_state_dict(q_base)
+    p_encoder = DebertaV2Model.from_pretrained(hparams.transformers_model_name)
+    q_encoder = DebertaV2Model.from_pretrained(hparams.transformers_model_name)
 
     # Instantiate objects
     model = KobertBiEncoder(passage_encoder=p_encoder, query_encoder=q_encoder).cuda(local_rank)
@@ -497,6 +458,7 @@ def main(hparams: TrainingArguments):
     # If you want to using own optimizer and scheduler,
     # check config `zero_allow_untested_optimizer` and `zero_force_ds_cpu_optimizer`
     ds_config = json_to_dict(hparams.deepspeed_config)
+
     update_auto_nested_dict(ds_config, "lr", initial_lr)
     update_auto_nested_dict(ds_config, "train_micro_batch_size_per_gpu", hparams.per_device_train_batch_size)
     update_auto_nested_dict(ds_config, "gradient_accumulation_steps", hparams.accumulate_grad_batches)
@@ -544,7 +506,6 @@ def main(hparams: TrainingArguments):
         == id(model.optimizer.param_groups[0])
     ), "optimizer is something changed check id!"
     criterion = torch.nn.MSELoss()
-    trainable_loss = None
 
     # I think some addr is same into trainer init&fit respectfully
     chk_addr_dict = {
@@ -556,7 +517,6 @@ def main(hparams: TrainingArguments):
         "scheduler_cfg": id(lr_scheduler),
         "scheduler_cfg[scheduler]": id(lr_scheduler["scheduler"]),
         "scheduler_cfg[scheduler].optimizer.param_groups": id(lr_scheduler["scheduler"].optimizer.param_groups),
-        "trainable_loss": id(trainable_loss),
     }
 
     log_str = f"""\n##########################################
@@ -587,7 +547,9 @@ def main(hparams: TrainingArguments):
         max_norm=hparams.max_norm,
         metric_on_cpu=hparams.metric_on_cpu,
     )
-
+    tokenizer.save_pretrained(hparams.output_dir)
+    DebertaV2Config.from_pretrained(hparams.transformers_model_name).save_pretrained(hparams.output_dir)
+    trainer.eval_loop(model=model, val_loader=eval_dataloader)
     trainer.fit(
         model=model,
         optimizer=optimizer,
@@ -595,7 +557,6 @@ def main(hparams: TrainingArguments):
         train_loader=train_dataloader,
         val_loader=eval_dataloader,
         ckpt_path=hparams.output_dir,
-        trainable_loss=trainable_loss,
     )
 
     if local_rank == 0:

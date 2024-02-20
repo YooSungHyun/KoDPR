@@ -8,6 +8,7 @@ from rank_bm25 import BM25Okapi
 from datasets import Dataset
 import multiprocessing as mp
 import random
+from collections import deque
 
 tokenizer = AutoTokenizer.from_pretrained("team-lucid/deberta-v3-base-korean")
 MODEL_MAX_LENGTH = 512
@@ -127,20 +128,32 @@ def make_bm25_hard(start_index, end_index, tot_ctxs, bm25, datasets, train_list,
             context_to_indices[context_value] = [index]
 
     for i in tqdm(range(start_index, end_index + 1), desc="hard bm25 making"):
+        temp_context = copy.deepcopy(context_to_indices)
         query = train_list[i]["question"]
 
         tokenized_query = tokenizer.tokenize(query)
         bm25_100 = bm25.get_top_n(tokenized_query, tot_ctxs, n=100)
-
+        q = deque(bm25_100)
         train_list[i]["bm25_hard"] = list()
-        for source in bm25_100:
-            source_indices = context_to_indices[source]
-            for idx in source_indices:
+        train_list_idx = 0
+        while q and train_list_idx < 100:
+            source = q[0]
+            while temp_context[source]:
+                idx = temp_context[source].pop()
                 if datasets[idx]["answer"] != train_list[i]["answer"]:
                     # bm25에 대한 정답이 다른 모든 passage를 저장함.
-                    train_list[i]["bm25_hard"].append(source)
+                    train_list[i]["bm25_hard"].append(idx)
+                    break
+            if not temp_context[source]:
+                q.popleft()
+                temp_context.pop(source)
+            if source == q[0]:
+                # val이 source와 같으면 아직은 남아있다는 뜻 (뒤로 붙힌다.)
+                q.rotate(-1)
+            train_list_idx += 1
 
         if train_list[i]["bm25_hard"]:
+            assert len(train_list[i]["bm25_hard"]) <= 100, "뭔가 이상한 놈이 추가된게 있다?"
             output.append(train_list[i])
 
 
@@ -161,14 +174,14 @@ def main():
 
     print("@@@@@@@@@@ train raw preprocess @@@@@@@@@@")
     train_dir = "./raw_data/train"
-    train_output = "train_data_bm25_mp.json"
+    train_output = "raw_preproc_bm25idx.json"
     if not os.path.exists(os.path.join(train_dir, train_output)):
         train_list = mp.Manager().list()
         train_error_list = mp.Manager().list()
         num_processes = mp.cpu_count()
         file_name, exp = train_output.split(".")
         preproc_split = file_name.split("_")[:2]
-        preproc_output = "_".join(preproc_split) + "_preproc_mp." + exp
+        preproc_output = "_".join(preproc_split) + "." + exp
         if not os.path.exists(os.path.join(train_dir, preproc_output)):
             data = list()
 
@@ -197,36 +210,34 @@ def main():
 
             with open(os.path.join(train_dir, preproc_output), "w", encoding="utf-8") as file:
                 file.write(json.dumps(train_list, indent=4))
-            with open(
-                os.path.join(train_dir, f"{'_'.join(preproc_split)}_error_mp.json"), "w", encoding="utf-8"
-            ) as file:
+            with open(os.path.join(train_dir, f"{'_'.join(preproc_split)}_error.json"), "w", encoding="utf-8") as file:
                 file.write(json.dumps(error_list, indent=4))
         else:
             with open(os.path.join(train_dir, preproc_output), "r", encoding="utf-8") as f:
                 train_list = json.load(f)
 
-        output = mp.Manager().list()
-        processes = []
-        chunk_size = max(len(train_list) // num_processes, 1)
-        datasets = Dataset.from_pandas(pd.DataFrame(data=train_list))
-        tot_ctxs = datasets["context"]
-        tokenized_corpus = [tokenizer.tokenize(doc) for doc in tot_ctxs]
-        bm25 = BM25Okapi(tokenized_corpus)
-        for idx in range(num_processes):
-            start_index = idx * chunk_size
-            end_index = min((idx + 1) * chunk_size, len(train_list))
-            p = mp.Process(
-                target=make_bm25_hard, args=(start_index, end_index, tot_ctxs, bm25, datasets, train_list, output)
-            )
-            processes.append(p)
-            p.start()
-        for child in processes:
-            child.join()
+            output = mp.Manager().list()
+            processes = []
+            chunk_size = max(len(train_list) // num_processes, 1)
+            datasets = Dataset.from_pandas(pd.DataFrame(data=train_list))
+            tot_ctxs = list(set(datasets["context"]))
+            tokenized_corpus = [tokenizer.tokenize(doc) for doc in tot_ctxs]
+            bm25 = BM25Okapi(tokenized_corpus)
+            for idx in range(num_processes):
+                start_index = idx * chunk_size
+                end_index = min((idx + 1) * chunk_size, len(train_list))
+                p = mp.Process(
+                    target=make_bm25_hard, args=(start_index, end_index, tot_ctxs, bm25, datasets, train_list, output)
+                )
+                processes.append(p)
+                p.start()
+            for child in processes:
+                child.join()
 
-        processed_data = list(output)
+            processed_data = list(output)
 
-        with open(os.path.join(train_dir, train_output), "w", encoding="utf-8") as file:
-            file.write(json.dumps(processed_data, indent=4))
+            with open(os.path.join(train_dir, train_output), "w", encoding="utf-8") as file:
+                file.write(json.dumps(processed_data, indent=4))
 
     VALID_DATASETS_TEMPLATES_01 = [
         "VL_span_extraction.json",
@@ -242,7 +253,7 @@ def main():
 
     print("@@@@@@@@@@ dev raw preprocess @@@@@@@@@@")
     valid_dir = "./raw_data/dev"
-    valid_output = "dev_data.json"
+    valid_output = "raw_preproc.json"
     if not os.path.exists(os.path.join(valid_dir, valid_output)):
         data = list()
         valid_list = []
