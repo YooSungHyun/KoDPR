@@ -35,30 +35,36 @@ if __name__ == "__main__":
         return examples
 
     train_dataset = JsonlDataset(dataset_name, transform=preprocess)
-    if not os.path.isfile(output_name):
-        custom_train_sampler = DistributedUniqueBM25Sampler(
-            dataset=train_dataset, batch_size=BATCH_SIZE, tokenizer=tokenizer, num_replicas=4, rank=0, seed=42
-        )
-        train_list = mp.Manager().list()
-        num_processes = mp.cpu_count()
-        divisors_of_b = [i for i in range(1, EPOCH + 1) if EPOCH % i == 0]
-        max_divisor_under_a = max([divisor for divisor in divisors_of_b if divisor <= num_processes])
-        num_processes = min(max_divisor_under_a, num_processes)
-        processes = []
-        chunk_size = max(EPOCH // num_processes, 1)
-        for idx in range(num_processes):
-            start_index = idx * chunk_size
-            end_index = min((idx + 1) * chunk_size, EPOCH)
-            p = mp.Process(target=custom_train_sampler.__make_indices__, args=(start_index, end_index, train_list))
-            processes.append(p)
-            p.start()
+    train_list = list()
+    if os.path.isfile(output_name):
+        with open(output_name, "r", encoding="utf-8") as f:
+            train_list = json.load(f)
+    custom_train_sampler = DistributedUniqueBM25Sampler(
+        dataset=train_dataset, batch_size=BATCH_SIZE, tokenizer=tokenizer, num_replicas=4, rank=0, seed=42
+    )
+    num_processes = mp.cpu_count()
+    start_point = len(train_list)
+    if start_point > 0:
+        EPOCH = EPOCH - start_point
+    divisors_of_b = [i for i in range(1, EPOCH + 1) if EPOCH % i == 0]
+    max_divisor_under_a = max([divisor for divisor in divisors_of_b if divisor <= num_processes])
+    train_list = mp.Manager().list(train_list)
+    num_processes = min(max_divisor_under_a, num_processes)
+    processes = []
+    chunk_size = max(EPOCH // num_processes, 1)
+    for idx in range(num_processes):
+        start_index = (idx * chunk_size) + start_point
+        end_index = min(((idx + 1) * chunk_size) + start_point, EPOCH)
+        p = mp.Process(target=custom_train_sampler.__make_indices__, args=(start_index, end_index, train_list))
+        processes.append(p)
+        p.start()
 
-        for child in processes:
-            child.join()
+    for child in processes:
+        child.join()
 
-        train_list = list(train_list)
-        with open(output_name, "w", encoding="utf-8") as file:
-            file.write(json.dumps(train_list, indent=4))
+    train_list = list(train_list)
+    with open(output_name, "w", encoding="utf-8") as file:
+        file.write(json.dumps(train_list, indent=4))
 
     # with open(output_name, "r", encoding="utf-8") as f:
     #     train_list = json.load(f)

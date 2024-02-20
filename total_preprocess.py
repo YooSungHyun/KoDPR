@@ -11,8 +11,6 @@ import random
 from collections import deque
 
 tokenizer = AutoTokenizer.from_pretrained("team-lucid/deberta-v3-base-korean")
-MODEL_MAX_LENGTH = 512
-CHUNK_SIZE = 100
 
 
 def make_bm25_hard(start_index, end_index, tot_ctxs, bm25, datasets, train_list, output):
