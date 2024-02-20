@@ -45,7 +45,7 @@ def make_bm25_hard(start_index, end_index, tot_ctxs, bm25, datasets, train_list,
             if not temp_context[source]:
                 q.popleft()
                 temp_context.pop(source)
-            if source == q[0]:
+            if q and source == q[0]:
                 # val이 source와 같으면 아직은 남아있다는 뜻 (뒤로 붙힌다.)
                 q.rotate(-1)
             train_list_idx += 1
