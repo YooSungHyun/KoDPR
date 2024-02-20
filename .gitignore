@@ -168,3 +168,4 @@ DeepSpeed
 wandb
 processed_passages
 raw_data
+model_base
