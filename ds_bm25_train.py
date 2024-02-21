@@ -30,6 +30,7 @@ from utils.data.custom_sampler import DistributedUniqueBM25Sampler
 from torch.cuda.amp import autocast
 from torch_optimizer import Adafactor
 from transformers import DebertaV2Model, DebertaV2Config
+from collections import Counter
 
 # it is only lstm example.
 torch.backends.cudnn.enabled = False
@@ -298,7 +299,7 @@ class DSTrainer(Trainer):
                 self.web_logger,
                 {
                     "eval/loss": epoch_loss,
-                    "eval_step/acc": tot_batch_corr / tot_batch_size,
+                    "eval/acc": tot_batch_corr / tot_batch_size,
                     "eval/epoch": self.current_epoch,
                 },
                 self.current_epoch,
@@ -360,22 +361,29 @@ def main(hparams: TrainingArguments):
     train_dataset = JsonlDataset(hparams.train_datasets_path, transform=preprocess)
     eval_dataset = JsonlDataset(hparams.eval_datasets_path, transform=preprocess)
 
+    hparams.per_device_train_batch_size = hparams.per_device_train_batch_size * 2
     custom_train_sampler = DistributedUniqueBM25Sampler(
         dataset=train_dataset,
         batch_size=hparams.per_device_train_batch_size,
         tokenizer=tokenizer,
+        indices_path=hparams.indices_path,
         num_replicas=world_size,
         rank=local_rank,
         seed=hparams.seed,
     )
     custom_eval_sampler = DistributedSampler(
-        dataset=eval_dataset, num_replicas=world_size, rank=local_rank, seed=hparams.seed, shuffle=False
+        dataset=eval_dataset,
+        num_replicas=world_size,
+        rank=local_rank,
+        seed=hparams.seed,
+        shuffle=False,
+        drop_last=True,
     )
-    hparams.per_device_train_batch_size = hparams.per_device_train_batch_size * 2
     test = list(custom_train_sampler.__iter__())
     for i in range(0, len(test), hparams.per_device_train_batch_size):
-        assert len(set(train_dataset[test[i : i + hparams.per_device_train_batch_size]]["answer"])) == len(
-            train_dataset[test[i : i + hparams.per_device_train_batch_size]]["answer"]
+        assert (
+            Counter(train_dataset[test[i : i + hparams.per_device_train_batch_size]]["answer"]).most_common(1)[0][1]
+            == 1
         ), "answer가 중복되는 배치 발생!"
 
     # DataLoader's shuffle: one device get random indices dataset in every epoch
@@ -549,7 +557,6 @@ def main(hparams: TrainingArguments):
     )
     tokenizer.save_pretrained(hparams.output_dir)
     DebertaV2Config.from_pretrained(hparams.transformers_model_name).save_pretrained(hparams.output_dir)
-    trainer.eval_loop(model=model, val_loader=eval_dataloader)
     trainer.fit(
         model=model,
         optimizer=optimizer,
