@@ -13,7 +13,7 @@ class TrainingArguments:
     train_data_ratio: float = 0.7
     seed: int = None  # all seed
     local_rank: int = None  # ddp local rank
-    data_dir: str = "datasets"  # target pytorch lightning data dirs
+    indices_path: str = ""  # target pytorch lightning data dirs
     output_dir: str = "model_outputs"  # model output path
     num_workers: int = 1  # how many proc map?
     optim_beta1: float = 0.9
