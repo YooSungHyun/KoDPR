@@ -84,7 +84,7 @@ class DSTrainer(Trainer):
             return
 
         def on_start_test(model):
-            model.test()
+            model.eval()
             # requires_grad = True, but loss.backward() raised error
             # because grad_fn is None
             torch.set_grad_enabled(False)
@@ -283,11 +283,13 @@ def main(hparams: InferenceArguments):
 
     # in deepspeed, precision is just using model log for .pt file
     precision_dict = {"fp32": torch.float32, "bf16": torch.bfloat16, "fp16": torch.float16}
-    precision = torch.float32
+    precision = hparams.model_dtype
     if precision in ["fp16", "float16"]:
         precision = precision_dict["fp16"]
     elif precision in ["bf16" or "bfloat16"]:
         precision = precision_dict["bf16"]
+    else:
+        precision = precision_dict["fp32"]
 
     model = deepspeed.init_inference(
         model=state["model"],
@@ -296,9 +298,6 @@ def main(hparams: InferenceArguments):
         injection_policy={KobertBiEncoder: ("passage_encoder.encoder", "query_encoder.encoder")},
         replace_with_kernel_inject=False,
     )
-
-    # monitor: ReduceLROnPlateau scheduler is stepped using loss, so monitor input train or val loss
-    test_metric = None
 
     # TODO(User): input your test_metric
     test_metric = None
