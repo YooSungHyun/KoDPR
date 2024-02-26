@@ -18,12 +18,9 @@ class DistributedUniqueSampler(DistributedSampler):
     DistributedSampler를 상속받아 'answer' 값 중복 방지 로직을 추가한 사용자 정의 Sampler
     """
 
-    def __init__(self, dataset, batch_size, tokenizer, num_replicas=None, rank=None, shuffle=True, seed=42):
+    def __init__(self, dataset, batch_size, num_replicas=None, rank=None, shuffle=True, seed=42):
         super().__init__(dataset, num_replicas=num_replicas, rank=rank, shuffle=shuffle, seed=seed)
         self.batch_size = batch_size
-        self.length = len(self.dataset)
-        self.tokenizer = tokenizer
-        self.sampler_size = self.length
         self._init_data_structures()
 
     def _init_data_structures(self):
@@ -81,12 +78,14 @@ class DistributedUniqueSampler(DistributedSampler):
                 self.answer_to_indices.pop(answer_key)
 
         # 분산 환경에 맞게 인덱스 조정
-        self.sampler_size = len(indices)
-        indices = indices[self.rank :: self.num_replicas]
+        min_val = math.floor(len(indices) / self.batch_size / self.num_replicas)
+        drop_last = min_val * self.batch_size * self.num_replicas
+        drop_last_indices = indices[:drop_last]
+        each_rank_indices = drop_last_indices[self.rank :: self.num_replicas]
         end = time.time()
 
         logger.info(f"@@@@@@ {self.rank}_sampler make iter time: {end - start:.5f} sec")
-        return iter(indices)
+        return iter(each_rank_indices)
 
     def __len__(self):
         return len(list(self.__iter__()))

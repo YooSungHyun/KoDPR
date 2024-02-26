@@ -21,5 +21,5 @@ class CustomDataLoader(torch.utils.data.DataLoader):
         return batch_p, batch_q
 
     def __len__(self):
-        length = math.ceil(len(self.sampler) / self.batch_size)
+        length = len(self.sampler) // self.batch_size
         return length

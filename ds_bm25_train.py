@@ -7,7 +7,6 @@ from typing import Optional, Union
 import deepspeed
 import torch
 import torch.distributed as dist
-from torch.utils.data import DistributedSampler
 import wandb
 from arguments.training_args import TrainingArguments
 from networks.models import KobertBiEncoder
@@ -26,7 +25,7 @@ from utils.comfy import (
 from transformers import AutoTokenizer
 from utils.data.jsonl_dataset import JsonlDataset
 from utils.data.custom_dataloader import CustomDataLoader
-from utils.data.custom_sampler import DistributedUniqueBM25Sampler
+from utils.data.custom_sampler import DistributedUniqueBM25Sampler, DistributedUniqueSampler
 from torch.cuda.amp import autocast
 from torch_optimizer import Adafactor
 from transformers import DebertaV2Model, DebertaV2Config
@@ -371,18 +370,27 @@ def main(hparams: TrainingArguments):
         rank=local_rank,
         seed=hparams.seed,
     )
-    custom_eval_sampler = DistributedSampler(
+    custom_eval_sampler = DistributedUniqueSampler(
         dataset=eval_dataset,
+        batch_size=hparams.per_device_eval_batch_size,
         num_replicas=world_size,
         rank=local_rank,
         seed=hparams.seed,
         shuffle=False,
-        drop_last=True,
     )
-    test = list(custom_train_sampler.__iter__())
-    for i in range(0, len(test), hparams.per_device_train_batch_size):
+
+    train_chk = list(custom_train_sampler.__iter__())
+    for i in range(0, len(train_chk), hparams.per_device_train_batch_size):
         assert (
-            Counter(train_dataset[test[i : i + hparams.per_device_train_batch_size]]["answer"]).most_common(1)[0][1]
+            Counter(train_dataset[train_chk[i : i + hparams.per_device_train_batch_size]]["answer"]).most_common(1)[0][
+                1
+            ]
+            == 1
+        ), "answer가 중복되는 배치 발생!"
+    eval_chk = list(custom_eval_sampler.__iter__())
+    for i in range(0, len(eval_chk), hparams.per_device_eval_batch_size):
+        assert (
+            Counter(eval_dataset[eval_chk[i : i + hparams.per_device_eval_batch_size]]["answer"]).most_common(1)[0][1]
             == 1
         ), "answer가 중복되는 배치 발생!"
 
