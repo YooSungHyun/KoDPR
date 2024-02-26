@@ -30,7 +30,7 @@ def main(hparams: InferenceArguments):
     tokenizer = AutoTokenizer.from_pretrained(hparams.transformers_model_name)
 
     text_q = ["밥을 맛있게 먹었냐?", "안녕하세요", "햄버거가 엄청 맛있습니다."]
-    text_p = ["학교종이 땡땡땡", "햄버거가 엄청 맛있습니다", "너는 뭐하는 사람이냐?"]
+    text_p = ["학교종이 땡땡땡", "햄버거가 엄청 맛있습니다", "밥을 맛있게 먹었냐?"]
     assert len(text_q) == len(text_p), "입력값 에러!"
     for i in range(len(text_q)):
         text_q[i] = tokenizer.cls_token + text_q[i]
@@ -67,7 +67,6 @@ def main(hparams: InferenceArguments):
     p_emb = model(batch_p, "passage")  # bsz x bert_dim
     q_emb = model(batch_q, "query")  # bsz x bert_dim
     pred = torch.matmul(q_emb, p_emb.T)  # bsz x bsz
-
     print(pred)
 
 
