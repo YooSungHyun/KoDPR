@@ -426,7 +426,7 @@ def main(hparams: TrainingArguments):
     q_encoder = DebertaV2Model.from_pretrained(hparams.transformers_model_name)
 
     # Instantiate objects
-    model = KobertBiEncoder(passage_encoder=p_encoder, query_encoder=q_encoder).cuda(local_rank)
+    model = KobertBiEncoder(passage_encoder=p_encoder, query_encoder=q_encoder, pooler=hparams.pooler).cuda(local_rank)
 
     if local_rank == 0:
         web_logger.watch(model, log_freq=hparams.log_every_n)
