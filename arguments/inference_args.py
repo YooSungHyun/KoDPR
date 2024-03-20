@@ -22,3 +22,4 @@ class InferenceArguments:
     group_by_length: bool = False
     fsdp_config: str = "./fsdp_config/config.json"
     accumulate_grad_batches: int = 1
+    pooler: bool = False
